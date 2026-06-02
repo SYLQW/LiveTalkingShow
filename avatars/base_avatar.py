@@ -302,13 +302,15 @@ class BaseAvatar:
             self.custom_index[audiotype] = 0
 
     # ========================== 核心渲染及 Pipeline 桥接 ==========================
-    def get_avatar_length(self):
+    def get_avatar_length(self, speaking: bool | None = None):
         if hasattr(self, 'frame_list_cycle'):
             return len(self.frame_list_cycle)
         return 1
+
+    def get_silent_frame(self, idx: int, audiotype: int | None = None):
+        return self.frame_list_cycle[idx]
         
     def inference(self, quit_event):
-        length = self.get_avatar_length()
         index = 0
         count = 0
         counttime = 0
@@ -338,6 +340,7 @@ class BaseAvatar:
             current_speaking = not is_all_silence
 
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
+                length = self.get_avatar_length(speaking=False)
                 for i in range(self.batch_size):
                     idx = mirror_index(length, index)
                     self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
@@ -347,6 +350,7 @@ class BaseAvatar:
                     index = 0
                 t = time.perf_counter()
 
+                length = self.get_avatar_length(speaking=True)
                 pred = self.inference_batch(index, audiofeat_batch)
 
                 counttime += (time.perf_counter() - t)
@@ -398,7 +402,7 @@ class BaseAvatar:
                     target_frame = self.custom_img_cycle[audiotype][mirindex]
                     self.custom_index[audiotype] += 1
                 else:
-                    target_frame = self.frame_list_cycle[idx]
+                    target_frame = self.get_silent_frame(idx, audiotype)
                 
                 if enable_transition:
                     # 说话→静音过渡

@@ -99,7 +99,23 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+a.buttonLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #b8c4d1;
+  background: #eef3f8;
+  color: #17202a;
+  border-radius: 6px;
+  padding: 9px 10px;
+  cursor: pointer;
+  text-decoration: none;
+  font-size: 13px;
+}
+
+button:hover,
+a.buttonLink:hover {
   background: #e1e9f1;
 }
 
@@ -126,8 +142,15 @@ button:hover {
   gap: 8px;
 }
 
+.controlActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .controlHeader span,
-.controlRow button {
+.controlRow button,
+.controlActions a {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -158,6 +181,39 @@ button:hover {
 
 .padControl {
   gap: 4px;
+}
+
+.clipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.clipPill {
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+.clipPillActive {
+  border-color: #2563eb;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.clipEmpty {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.checkboxLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkboxLine input {
+  width: auto;
 }
 
 .videoPanel {
@@ -233,6 +289,334 @@ canvas {
   min-width: 0;
 }
 
+.motionApp {
+  background: #f4f6f8;
+}
+
+.motionShell {
+  max-width: 1280px;
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+}
+
+.motionTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.motionEditor {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.35fr) minmax(360px, 0.65fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.motionVideoPanel,
+.motionWorkPanel,
+.queuePanel,
+.libraryPanel,
+.logPanel {
+  padding: 16px;
+  min-width: 0;
+}
+
+.motionVideoPanel,
+.motionWorkPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.sourceBar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.sourceBar button {
+  min-width: 120px;
+}
+
+.videoPreviewBox {
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+  background: #161a1f;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.motionVideo {
+  width: 100%;
+  max-height: 520px;
+  background: #111827;
+}
+
+.videoPlaceholder {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.timelinePanel {
+  display: grid;
+  gap: 10px;
+}
+
+.timeReadout,
+.sourceMeta,
+.segmentActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: #51606f;
+  font-size: 13px;
+}
+
+.timeReadout span,
+.sourceMeta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.timelineTrack {
+  position: relative;
+  height: 32px;
+  border-radius: 6px;
+  background: #e5e9ef;
+  overflow: hidden;
+}
+
+.timelineTrack input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.timelineSelection {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  border-radius: 4px;
+  background: rgba(34, 197, 94, 0.38);
+  border: 1px solid rgba(22, 163, 74, 0.55);
+}
+
+.timelineCursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ef4444;
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.15);
+}
+
+.markButtons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.advancedBox {
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 10px;
+}
+
+.advancedBox summary {
+  cursor: pointer;
+  color: #334155;
+  font-weight: 650;
+}
+
+.advancedBox[open] {
+  display: grid;
+  gap: 10px;
+}
+
+.advancedBox[open] summary {
+  margin-bottom: 2px;
+}
+
+.motionLists {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(320px, 0.78fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.queuePanel {
+  display: grid;
+  gap: 12px;
+}
+
+.libraryPanel {
+  display: grid;
+  gap: 12px;
+}
+
+.logPanel {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.segmentList {
+  display: grid;
+  gap: 10px;
+}
+
+.segmentCard {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.segmentCardWarning {
+  border-color: #fca5a5;
+  background: #fff7f7;
+}
+
+.fieldHint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.dangerHint {
+  color: #b91c1c;
+}
+
+.segmentFields {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(140px, 1fr) minmax(88px, 0.45fr) minmax(88px, 0.45fr);
+  gap: 8px;
+}
+
+.segmentActions {
+  justify-content: space-between;
+}
+
+.segmentActions button {
+  min-width: 76px;
+}
+
+.doneText {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  border-radius: 4px;
+  padding: 3px 7px;
+}
+
+.motionGrid {
+  display: grid;
+  grid-template-columns: minmax(420px, 620px) minmax(360px, 1fr);
+  gap: 14px;
+}
+
+.motionForm {
+  min-width: 0;
+}
+
+.motionSide {
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.clipCards {
+  display: grid;
+  gap: 8px;
+}
+
+.clipCard {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  background: #ffffff;
+  font-size: 13px;
+  color: #51606f;
+}
+
+.clipCard strong {
+  color: #17202a;
+}
+
+.clipCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.clipCardHead > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.clipCardHead button {
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.clipCard em {
+  width: max-content;
+  font-style: normal;
+  color: #1d4ed8;
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.clipEditBox {
+  display: grid;
+  gap: 9px;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.clipEditBox textarea {
+  min-height: 76px;
+}
+
+.motionStatus {
+  justify-content: flex-start;
+}
+
 pre {
   margin: 0;
   flex: 1;
@@ -244,6 +628,31 @@ pre {
   color: #d7e0ea;
   border-radius: 6px;
   padding: 10px;
+}
+
+@media (max-width: 980px) {
+  .motionEditor,
+  .motionLists,
+  .motionGrid,
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace {
+    grid-template-rows: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .sourceBar,
+  .markButtons,
+  .segmentFields {
+    grid-template-columns: 1fr;
+  }
+
+  .videoPreviewBox {
+    min-height: 260px;
+  }
 }
 
 @media (max-width: 900px) {

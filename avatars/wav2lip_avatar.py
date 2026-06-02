@@ -88,8 +88,7 @@ def load_model(path):
     model = model.to(device)
     return model.eval()
 
-def load_avatar(avatar_id):
-    avatar_path = f"./data/avatars/{avatar_id}"
+def _load_avatar_bundle(avatar_path):
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
     coords_path = f"{avatar_path}/coords.pkl"
@@ -110,6 +109,40 @@ def load_avatar(avatar_id):
             metadata = json.load(f)
 
     return frame_list_cycle,face_list_cycle,coord_list_cycle,metadata
+
+def load_avatar(avatar_id):
+    return _load_avatar_bundle(f"./data/avatars/{avatar_id}")
+
+def load_motion_clips(avatar_id, root_name="speaking_actions"):
+    root = f"./data/{root_name}/{avatar_id}"
+    if not os.path.isdir(root):
+        return {}
+
+    clips = {}
+    for action_id in sorted(os.listdir(root)):
+        action_path = os.path.join(root, action_id)
+        if not os.path.isdir(action_path):
+            continue
+        try:
+            frames, faces, coords, metadata = _load_avatar_bundle(action_path)
+        except Exception as exc:
+            logger.warning("skip %s motion clip %s: %s", root_name, action_path, exc)
+            continue
+        metadata["action_id"] = action_id
+        metadata.setdefault("display_name", action_id)
+        clips[action_id] = {
+            "frames": frames,
+            "faces": faces,
+            "coords": coords,
+            "metadata": metadata,
+        }
+    return clips
+
+def load_speaking_motion_clips(avatar_id):
+    return load_motion_clips(avatar_id, "speaking_actions")
+
+def load_idle_motion_clips(avatar_id):
+    return load_motion_clips(avatar_id, "idle_actions")
 
 @torch.no_grad()
 def warm_up(batch_size,model,modelres):
@@ -133,6 +166,14 @@ class LipReal(BaseAvatar):
         self.model = model
         self.face_input_size = WAV2LIP_FACE_SIZE
         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle,self.metadata = avatar
+        self.motion_clips = load_speaking_motion_clips(getattr(opt, "avatar_id", ""))
+        self.idle_motion_clips = load_idle_motion_clips(getattr(opt, "avatar_id", ""))
+        self.current_motion_clip_id = None
+        self.current_idle_clip_id = None
+        if self.motion_clips:
+            logger.info("loaded speaking motion clips: %s", sorted(self.motion_clips.keys()))
+        if self.idle_motion_clips:
+            logger.info("loaded idle motion clips: %s", sorted(self.idle_motion_clips.keys()))
         generation_pads = self.metadata.get("generation_pads", self.metadata.get("baked_pads", [0, 0, 0, 0]))
         self.generation_pads = self._normalize_pads(generation_pads)
         self.runtime_pads = _parse_runtime_pads(self.generation_pads)
@@ -150,6 +191,97 @@ class LipReal(BaseAvatar):
 
     def set_runtime_pads(self, pads):
         self.runtime_pads = self._normalize_pads(pads)
+
+    def reload_speaking_motions(self):
+        self.motion_clips = load_speaking_motion_clips(getattr(self.opt, "avatar_id", ""))
+        if self.current_motion_clip_id not in self.motion_clips:
+            self.current_motion_clip_id = None
+        logger.info("reloaded speaking motion clips: %s", sorted(self.motion_clips.keys()))
+        return self.list_speaking_motions()
+
+    def reload_idle_motions(self):
+        self.idle_motion_clips = load_idle_motion_clips(getattr(self.opt, "avatar_id", ""))
+        if self.current_idle_clip_id not in self.idle_motion_clips:
+            self.current_idle_clip_id = None
+        logger.info("reloaded idle motion clips: %s", sorted(self.idle_motion_clips.keys()))
+        return self.list_idle_motions()
+
+    def list_speaking_motions(self):
+        return [
+            {
+                **clip["metadata"],
+                "frame_count": len(clip["frames"]),
+                "current": action_id == self.current_motion_clip_id,
+            }
+            for action_id, clip in sorted(self.motion_clips.items())
+        ]
+
+    def list_idle_motions(self):
+        return [
+            {
+                **clip["metadata"],
+                "frame_count": len(clip["frames"]),
+                "current": action_id == self.current_idle_clip_id,
+            }
+            for action_id, clip in sorted(self.idle_motion_clips.items())
+        ]
+
+    def set_speaking_motion(self, action_id):
+        action_id = str(action_id or "").strip()
+        if not action_id or action_id in {"default", "none", "null"}:
+            self.current_motion_clip_id = None
+            logger.info("speaking motion clip cleared")
+            return {"action_id": "", "display_name": "default", "current": True}
+        if action_id not in self.motion_clips:
+            raise ValueError(f"speaking motion clip not found: {action_id}")
+        self.current_motion_clip_id = action_id
+        clip = self.motion_clips[action_id]
+        logger.info("speaking motion clip selected: %s", action_id)
+        return {
+            **clip["metadata"],
+            "frame_count": len(clip["frames"]),
+            "current": True,
+        }
+
+    def set_idle_motion(self, action_id):
+        action_id = str(action_id or "").strip()
+        if not action_id or action_id in {"default", "none", "null"}:
+            self.current_idle_clip_id = None
+            logger.info("idle motion clip cleared")
+            return {"action_id": "", "display_name": "固定第一帧", "current": True}
+        if action_id not in self.idle_motion_clips:
+            raise ValueError(f"idle motion clip not found: {action_id}")
+        self.current_idle_clip_id = action_id
+        clip = self.idle_motion_clips[action_id]
+        logger.info("idle motion clip selected: %s", action_id)
+        return {
+            **clip["metadata"],
+            "frame_count": len(clip["frames"]),
+            "current": True,
+        }
+
+    def _active_motion_clip(self):
+        if self.current_motion_clip_id:
+            return self.motion_clips.get(self.current_motion_clip_id)
+        return None
+
+    def _active_idle_clip(self):
+        if self.current_idle_clip_id:
+            return self.idle_motion_clips.get(self.current_idle_clip_id)
+        return None
+
+    def get_avatar_length(self, speaking: bool | None = None):
+        clip = self._active_motion_clip() if speaking else self._active_idle_clip()
+        if clip:
+            return len(clip["frames"])
+        return len(self.frame_list_cycle) if speaking else 1
+
+    def get_silent_frame(self, idx: int, audiotype: int | None = None):
+        clip = self._active_idle_clip()
+        if clip:
+            idle_idx = mirror_index(len(clip["frames"]), idx)
+            return copy.deepcopy(clip["frames"][idle_idx])
+        return copy.deepcopy(self.frame_list_cycle[0])
 
     def _paste_delta_pads(self):
         return [current - base for current, base in zip(self.runtime_pads, self.generation_pads)]
@@ -182,11 +314,13 @@ class LipReal(BaseAvatar):
     def inference_batch(self, index, audiofeat_batch):
         # 这里的 index 是针对当前 avatar 的索引
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
-        length = len(self.face_list_cycle)
+        clip = self._active_motion_clip()
+        face_list_cycle = clip["faces"] if clip else self.face_list_cycle
+        length = len(face_list_cycle)
         img_batch = []
         for i in range(self.batch_size):
             idx = mirror_index(length, index + i)
-            face = self.face_list_cycle[idx]
+            face = face_list_cycle[idx]
             if face.ndim == 3 and face.shape[2] == 4:
                 face = cv2.cvtColor(face, cv2.COLOR_BGRA2BGR)
             if face.shape[:2] != (self.face_input_size, self.face_input_size):
@@ -209,10 +343,17 @@ class LipReal(BaseAvatar):
         return pred
 
     def paste_back_frame(self,pred_frame,idx:int):
-        bbox = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        clip = self._active_motion_clip()
+        if clip:
+            bbox = clip["coords"][idx]
+            combine_frame = copy.deepcopy(clip["frames"][idx])
+            paste_pads = [0, 0, 0, 0]
+        else:
+            bbox = self.coord_list_cycle[idx]
+            combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+            paste_pads = self._paste_delta_pads()
         source_h, source_w = combine_frame.shape[:2]
-        padded = self._bbox_to_xyxy(bbox, self._paste_delta_pads(), source_w, source_h)
+        padded = self._bbox_to_xyxy(bbox, paste_pads, source_w, source_h)
         x1, y1, x2, y2 = padded["x1"], padded["y1"], padded["x2"], padded["y2"]
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         if combine_frame.ndim == 3 and combine_frame.shape[2] == 4:

@@ -99,6 +99,10 @@ function App() {
   const [pads, setPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
   const [generationPads, setGenerationPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
   const [pasteDeltaPads, setPasteDeltaPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
+  const [motionClips, setMotionClips] = useState([]);
+  const [selectedMotion, setSelectedMotion] = useState('');
+  const [idleClips, setIdleClips] = useState([]);
+  const [selectedIdleMotion, setSelectedIdleMotion] = useState('');
   const [tuningInfo, setTuningInfo] = useState(null);
   const [canvasBox, setCanvasBox] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [voices, setVoices] = useState([]);
@@ -395,6 +399,8 @@ function App() {
       setStatus('ready');
       addLog('健康检查完成', { live: liveJson.code, tts: ttsJson.status || ttsJson.provider });
       if (liveJson?.data?.sessionid) syncTuning(String(liveJson.data.sessionid));
+      if (liveJson?.data?.sessionid) refreshMotionClips(String(liveJson.data.sessionid));
+      if (liveJson?.data?.sessionid) refreshIdleClips(String(liveJson.data.sessionid));
     } catch (error) {
       setStatus('error');
       addLog('健康检查失败', { error: String(error) });
@@ -426,6 +432,86 @@ function App() {
       addLog('同步调试参数失败', { error: String(error) });
     }
   }, [addLog, applyTuningPayload, normalized.live, sessionId]);
+
+  const refreshMotionClips = useCallback(async (targetSessionId = sessionId) => {
+    try {
+      const query = targetSessionId ? `?sessionid=${encodeURIComponent(targetSessionId)}` : '';
+      const resp = await fetch(`${normalized.live}/motion/clips${query}${query ? '&' : '?'}kind=speaking`);
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'motion clips failed');
+      const clips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
+      setMotionClips(clips);
+      const current = clips.find((clip) => clip.current);
+      if (current?.action_id) {
+        setSelectedMotion(current.action_id);
+      }
+      addLog('说话动作已刷新', { clips: clips.map((clip) => clip.action_id) });
+    } catch (error) {
+      addLog('刷新说话动作失败', { error: String(error) });
+    }
+  }, [addLog, normalized.live, sessionId]);
+
+  const refreshIdleClips = useCallback(async (targetSessionId = sessionId) => {
+    try {
+      const query = targetSessionId ? `?sessionid=${encodeURIComponent(targetSessionId)}` : '';
+      const resp = await fetch(`${normalized.live}/motion/clips${query}${query ? '&' : '?'}kind=idle`);
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'idle clips failed');
+      const clips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
+      setIdleClips(clips);
+      const current = clips.find((clip) => clip.current);
+      if (current?.action_id) {
+        setSelectedIdleMotion(current.action_id);
+      } else {
+        setSelectedIdleMotion('');
+      }
+      addLog('静息动作已刷新', { clips: clips.map((clip) => clip.action_id) });
+    } catch (error) {
+      addLog('刷新静息动作失败', { error: String(error) });
+    }
+  }, [addLog, normalized.live, sessionId]);
+
+  const selectMotionClip = useCallback(async (actionId) => {
+    setSelectedMotion(actionId);
+    try {
+      const resp = await fetch(`${normalized.live}/motion/select`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid: sessionId || undefined,
+          kind: 'speaking',
+          action_id: actionId
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'motion select failed');
+      addLog('说话动作已选择', payload.data?.selected || {});
+      refreshMotionClips(payload.data?.sessionid || sessionId);
+    } catch (error) {
+      addLog('选择说话动作失败', { error: String(error) });
+    }
+  }, [addLog, normalized.live, refreshMotionClips, sessionId]);
+
+  const selectIdleClip = useCallback(async (actionId) => {
+    setSelectedIdleMotion(actionId);
+    try {
+      const resp = await fetch(`${normalized.live}/motion/select`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid: sessionId || undefined,
+          kind: 'idle',
+          action_id: actionId
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'idle motion select failed');
+      addLog('静息动作已选择', payload.data?.selected || {});
+      refreshIdleClips(payload.data?.sessionid || sessionId);
+    } catch (error) {
+      addLog('选择静息动作失败', { error: String(error) });
+    }
+  }, [addLog, normalized.live, refreshIdleClips, sessionId]);
 
   const updatePads = useCallback(async (nextPads) => {
     setPads(nextPads);
@@ -463,6 +549,8 @@ function App() {
       setSessionId(String(payload.data.sessionid));
       addLog('alpha session ready', { sessionid: payload.data.sessionid });
       syncTuning(String(payload.data.sessionid));
+      refreshMotionClips(String(payload.data.sessionid));
+      refreshIdleClips(String(payload.data.sessionid));
     } catch (error) {
       addLog('创建 alpha session 失败', { error: String(error) });
     }
@@ -651,6 +739,82 @@ function App() {
               <button type="button" onClick={() => syncTuning()}>
                 <Cable size={15} />同步
               </button>
+            </div>
+          </div>
+
+          <div className="tuningPanel">
+            <div className="controlHeader">
+              <span><SlidersHorizontal size={16} />说话动作</span>
+              <div className="controlActions">
+                <button type="button" onClick={() => refreshMotionClips()}>
+                  <Cable size={15} />刷新
+                </button>
+                <a className="buttonLink" href="/motion.html" target="_blank" rel="noreferrer">
+                  <Play size={15} />制作
+                </a>
+              </div>
+            </div>
+            <label>
+              当前动作片段
+              <select value={selectedMotion} onChange={(event) => selectMotionClip(event.target.value)}>
+                <option value="">默认动作</option>
+                {motionClips.map((clip) => (
+                  <option value={clip.action_id} key={clip.action_id}>
+                    {clip.display_name || clip.action_id} ({clip.frame_count || 0})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="clipList">
+              {motionClips.length === 0 && <span className="clipEmpty">暂无动作片段</span>}
+              {motionClips.map((clip) => (
+                <button
+                  type="button"
+                  className={`clipPill ${clip.current ? 'clipPillActive' : ''}`}
+                  key={clip.action_id}
+                  onClick={() => selectMotionClip(clip.action_id)}
+                >
+                  {clip.display_name || clip.action_id}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="tuningPanel">
+            <div className="controlHeader">
+              <span><SlidersHorizontal size={16} />静息动作</span>
+              <div className="controlActions">
+                <button type="button" onClick={() => refreshIdleClips()}>
+                  <Cable size={15} />刷新
+                </button>
+                <a className="buttonLink" href="/motion.html?kind=idle" target="_blank" rel="noreferrer">
+                  <Play size={15} />制作
+                </a>
+              </div>
+            </div>
+            <label>
+              当前静息片段
+              <select value={selectedIdleMotion} onChange={(event) => selectIdleClip(event.target.value)}>
+                <option value="">固定第一帧</option>
+                {idleClips.map((clip) => (
+                  <option value={clip.action_id} key={clip.action_id}>
+                    {clip.display_name || clip.action_id} ({clip.frame_count || 0})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="clipList">
+              {idleClips.length === 0 && <span className="clipEmpty">暂无静息动作片段</span>}
+              {idleClips.map((clip) => (
+                <button
+                  type="button"
+                  className={`clipPill ${clip.current ? 'clipPillActive' : ''}`}
+                  key={clip.action_id}
+                  onClick={() => selectIdleClip(clip.action_id)}
+                >
+                  {clip.display_name || clip.action_id}
+                </button>
+              ))}
             </div>
           </div>
 
