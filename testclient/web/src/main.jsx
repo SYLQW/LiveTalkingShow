@@ -44,6 +44,21 @@ const PAD_LABELS = {
   left: '左',
   right: '右'
 };
+const PAD_KEYS = ['top', 'bottom', 'left', 'right'];
+
+function padsFromArray(values) {
+  const source = Array.isArray(values) ? values : [0, 0, 0, 0];
+  return {
+    top: Number(source[0]) || 0,
+    bottom: Number(source[1]) || 0,
+    left: Number(source[2]) || 0,
+    right: Number(source[3]) || 0
+  };
+}
+
+function formatPads(padsValue) {
+  return PAD_KEYS.map((key) => `${PAD_LABELS[key]} ${padsValue[key] ?? 0}`).join('，');
+}
 
 function parseFrame(packet) {
   if (!packet || packet.byteLength < 24) return null;
@@ -82,6 +97,8 @@ function App() {
   const [sharpness, setSharpness] = useState(DEFAULTS.sharpness);
   const [showOverlay, setShowOverlay] = useState(true);
   const [pads, setPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
+  const [generationPads, setGenerationPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
+  const [pasteDeltaPads, setPasteDeltaPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
   const [tuningInfo, setTuningInfo] = useState(null);
   const [canvasBox, setCanvasBox] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [voices, setVoices] = useState([]);
@@ -390,13 +407,10 @@ function App() {
     setTuningInfo(data);
     if (data.sessionid) setSessionId(String(data.sessionid));
     if (Array.isArray(data.pads) && data.pads.length >= 4) {
-      setPads({
-        top: Number(data.pads[0]) || 0,
-        bottom: Number(data.pads[1]) || 0,
-        left: Number(data.pads[2]) || 0,
-        right: Number(data.pads[3]) || 0
-      });
+      setPads(padsFromArray(data.pads));
     }
+    setGenerationPads(padsFromArray(data.generation_pads || data.baked_pads));
+    setPasteDeltaPads(padsFromArray(data.paste_delta_pads));
     window.requestAnimationFrame(updateCanvasBox);
   }, [updateCanvasBox]);
 
@@ -610,14 +624,19 @@ function App() {
                 {showOverlay ? <Eye size={15} /> : <EyeOff size={15} />}
               </button>
             </div>
+            <div className="padSummary">
+              <span>当前使用：{formatPads(pads)}</span>
+              <span>生成 avatar 时：{formatPads(generationPads)}</span>
+              <strong>贴回差值：{formatPads(pasteDeltaPads)}</strong>
+            </div>
             <div className="padsGrid">
               {Object.entries(PAD_LABELS).map(([key, label]) => (
                 <label className="padControl" key={key}>
                   <span>{label} {pads[key]}</span>
                   <input
                     type="range"
-                    min="-120"
-                    max="120"
+                    min="-300"
+                    max="300"
                     step="1"
                     value={pads[key]}
                     onChange={(event) => setPadValue(key, event.target.value)}

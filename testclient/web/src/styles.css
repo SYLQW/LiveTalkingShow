@@ -139,6 +139,23 @@ button:hover {
   gap: 8px 10px;
 }
 
+.padSummary {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #51606f;
+  background: #ffffff;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.padSummary strong {
+  color: #17202a;
+  font-weight: 650;
+}
+
 .padControl {
   gap: 4px;
 }

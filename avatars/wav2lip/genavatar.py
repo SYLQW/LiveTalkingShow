@@ -182,6 +182,15 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
     print(f"写入数据到坐标文件: {coords_path}")
     with open(coords_path, 'wb') as f:
         pickle.dump(coord_list, f)
+    metadata = {
+        "generation_pads": [int(value) for value in pads[:4]],
+        "img_size": int(img_size),
+        "frames": len(coord_list),
+        "source_path": video_path,
+    }
+    with open(os.path.join(avatar_path, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+        f.write("\n")
 
     del detector
     if progress_callback:
