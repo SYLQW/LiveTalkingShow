@@ -1,6 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Cable, Eye, EyeOff, Mic, Play, RotateCcw, Send, SlidersHorizontal, Square, Video, Volume2, VolumeX } from 'lucide-react';
+import {
+  Activity,
+  Cable,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  ImageUp,
+  Mic,
+  Play,
+  Presentation,
+  RotateCcw,
+  Send,
+  SlidersHorizontal,
+  Square,
+  Video,
+  Volume2,
+  VolumeX
+} from 'lucide-react';
 import './styles.css';
 
 function wsUrl(base, path) {
@@ -126,8 +144,13 @@ function App() {
   const [motionPlan, setMotionPlan] = useState([]);
   const [motionPlanProvider, setMotionPlanProvider] = useState('');
   const [motionPlanRunning, setMotionPlanRunning] = useState(false);
+  const [classroomMode, setClassroomMode] = useState(false);
+  const [slideItems, setSlideItems] = useState([]);
+  const [slideIndex, setSlideIndex] = useState(0);
+  const [avatarSize, setAvatarSize] = useState(24);
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
+  const slideInputRef = useRef(null);
   const socketRef = useRef(null);
   const audioSocketRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -140,6 +163,7 @@ function App() {
   const motionPlanStopRef = useRef(false);
   const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
   const audioStatsRef = useRef({ chunks: 0, bytes: 0, lastUpdateAt: 0 });
+  const currentSlide = slideItems[slideIndex] || null;
 
   const addLog = useCallback((message, data) => {
     const time = new Date().toLocaleTimeString();
@@ -447,13 +471,14 @@ function App() {
     }
   }, [addLog, applyTuningPayload, normalized.live, sessionId]);
 
-  const refreshMotionClips = useCallback(async (targetSessionId = sessionId) => {
+  const refreshMotionClips = useCallback(async (targetSessionId = sessionId, options = {}) => {
     try {
       const query = new URLSearchParams({
         kind: 'speaking',
         avatar_id: DEFAULTS.avatarId
       });
       if (targetSessionId) query.set('sessionid', targetSessionId);
+      if (options.reload) query.set('reload', '1');
       const resp = await fetch(`${normalized.live}/motion/clips?${query.toString()}`);
       const payload = await resp.json();
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'motion clips failed');
@@ -469,13 +494,14 @@ function App() {
     }
   }, [addLog, normalized.live, sessionId]);
 
-  const refreshIdleClips = useCallback(async (targetSessionId = sessionId) => {
+  const refreshIdleClips = useCallback(async (targetSessionId = sessionId, options = {}) => {
     try {
       const query = new URLSearchParams({
         kind: 'idle',
         avatar_id: DEFAULTS.avatarId
       });
       if (targetSessionId) query.set('sessionid', targetSessionId);
+      if (options.reload) query.set('reload', '1');
       const resp = await fetch(`${normalized.live}/motion/clips?${query.toString()}`);
       const payload = await resp.json();
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'idle clips failed');
@@ -789,9 +815,55 @@ function App() {
     }
   };
 
+  const chooseSlides = useCallback(() => {
+    slideInputRef.current?.click();
+  }, []);
+
+  const loadSlideImages = useCallback((event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length === 0) return;
+    setSlideItems((current) => {
+      current.forEach((item) => URL.revokeObjectURL(item.url));
+      return files
+        .filter((file) => file.type.startsWith('image/'))
+        .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN', { numeric: true }))
+        .map((file, index) => ({
+          id: `${file.name}_${file.lastModified}_${index}`,
+          name: file.name,
+          url: URL.createObjectURL(file)
+        }));
+    });
+    setSlideIndex(0);
+    setClassroomMode(true);
+    addLog('幻灯片图片已加载', { count: files.length });
+  }, [addLog]);
+
+  useEffect(() => () => {
+    slideItems.forEach((item) => URL.revokeObjectURL(item.url));
+  }, [slideItems]);
+
+  const prevSlide = useCallback(() => {
+    setSlideIndex((index) => Math.max(0, index - 1));
+  }, []);
+
+  const nextSlide = useCallback(() => {
+    setSlideIndex((index) => Math.min(slideItems.length - 1, index + 1));
+  }, [slideItems.length]);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (!classroomMode) return;
+      if (event.key === 'ArrowLeft') prevSlide();
+      if (event.key === 'ArrowRight') nextSlide();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [classroomMode, nextSlide, prevSlide]);
+
   return (
     <main className="app">
-      <section className="workspace">
+      <section className={`workspace ${classroomMode ? 'workspaceClassroom' : ''}`}>
         <div className="panel controls">
           <div className="title">
             <Activity size={18} />
@@ -904,7 +976,7 @@ function App() {
             <div className="controlHeader">
               <span><SlidersHorizontal size={16} />说话动作</span>
               <div className="controlActions">
-                <button type="button" onClick={() => refreshMotionClips()}>
+                <button type="button" onClick={() => refreshMotionClips(sessionId, { reload: true })}>
                   <Cable size={15} />刷新
                 </button>
                 <a className="buttonLink" href="/motion.html" target="_blank" rel="noreferrer">
@@ -942,7 +1014,7 @@ function App() {
             <div className="controlHeader">
               <span><SlidersHorizontal size={16} />静息动作</span>
               <div className="controlActions">
-                <button type="button" onClick={() => refreshIdleClips()}>
+                <button type="button" onClick={() => refreshIdleClips(sessionId, { reload: true })}>
                   <Cable size={15} />刷新
                 </button>
                 <a className="buttonLink" href="/motion.html?kind=idle" target="_blank" rel="noreferrer">
@@ -987,6 +1059,46 @@ function App() {
               onChange={(event) => setSharpness(Number.parseInt(event.target.value || '0', 10))}
             />
           </label>
+
+          <div className="tuningPanel">
+            <div className="controlHeader">
+              <span><Presentation size={16} />课堂模式</span>
+              <button type="button" onClick={() => setClassroomMode((value) => !value)}>
+                {classroomMode ? '退出' : '开启'}
+              </button>
+            </div>
+            <input
+              ref={slideInputRef}
+              className="hiddenFileInput"
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={loadSlideImages}
+            />
+            <button type="button" onClick={chooseSlides}>
+              <ImageUp size={16} />选择幻灯片图片
+            </button>
+            <div className="slideControls">
+              <button type="button" onClick={prevSlide} disabled={slideItems.length === 0 || slideIndex <= 0}>
+                <ChevronLeft size={16} />上一页
+              </button>
+              <span>{slideItems.length ? `${slideIndex + 1} / ${slideItems.length}` : '未加载'}</span>
+              <button type="button" onClick={nextSlide} disabled={slideItems.length === 0 || slideIndex >= slideItems.length - 1}>
+                下一页<ChevronRight size={16} />
+              </button>
+            </div>
+            <label>
+              数字人大小 {avatarSize}%
+              <input
+                type="range"
+                min="14"
+                max="42"
+                step="1"
+                value={avatarSize}
+                onChange={(event) => setAvatarSize(Number.parseInt(event.target.value || '24', 10))}
+              />
+            </label>
+          </div>
 
           <label>
             Prompts
@@ -1036,12 +1148,28 @@ function App() {
           </div>
         </div>
 
-        <div className="panel videoPanel">
+        <div className={`panel videoPanel ${classroomMode ? 'classroomPanel' : ''}`}>
           <div className="videoHead">
-            <span>Alpha Video</span>
+            <span>{classroomMode ? '课堂展示' : 'Alpha Video'}</span>
             <span>{videoState} | {frameInfo.width}x{frameInfo.height} | #{frameInfo.seq} | {frameInfo.fps.toFixed(1)} fps</span>
           </div>
-          <div className={`canvasWrap ${DEFAULTS.videoFit === 'native' ? 'canvasWrapNative' : ''}`} ref={stageRef}>
+          <div
+            className={`canvasWrap ${DEFAULTS.videoFit === 'native' ? 'canvasWrapNative' : ''} ${classroomMode ? 'classroomStage' : ''}`}
+            ref={stageRef}
+            style={classroomMode ? { '--avatar-size': `${avatarSize}%` } : undefined}
+          >
+            {classroomMode && (
+              <div className="slideStage">
+                {currentSlide ? (
+                  <img src={currentSlide.url} alt={currentSlide.name} />
+                ) : (
+                  <div className="slidePlaceholder">
+                    <Presentation size={44} />
+                    <span>选择 PPT 导出的图片页后开始展示</span>
+                  </div>
+                )}
+              </div>
+            )}
             <canvas ref={canvasRef} style={canvasStyle} />
             {baseOverlayStyle && <div className="cropOverlay cropOverlayBase" style={baseOverlayStyle} />}
             {paddedOverlayStyle && <div className="cropOverlay cropOverlayActive" style={paddedOverlayStyle} />}

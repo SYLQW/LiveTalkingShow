@@ -887,7 +887,8 @@ async def motion_clips(request):
         if not hasattr(avatar_session, list_method):
             return json_error(f"current avatar does not support {kind} motion clips")
         reload_method = "reload_idle_motions" if kind == "idle" else "reload_speaking_motions"
-        if hasattr(avatar_session, reload_method):
+        reload_requested = str(params.get("reload", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if reload_requested and hasattr(avatar_session, reload_method):
             clips = getattr(avatar_session, reload_method)()
         else:
             clips = getattr(avatar_session, list_method)()
@@ -1221,7 +1222,7 @@ async def motion_create_clip(request):
             shutil.rmtree(target_dir)
 
         fixed_face_box = params.get("fixed_face_box")
-        use_fixed_face_box = bool(params.get("use_fixed_face_box", True))
+        use_fixed_face_box = bool(params.get("use_fixed_face_box", False))
         if not fixed_face_box and use_fixed_face_box:
             preview = await asyncio.to_thread(
                 _detect_motion_preview,

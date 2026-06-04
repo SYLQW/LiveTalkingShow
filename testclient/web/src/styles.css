@@ -27,6 +27,17 @@ button, input, select, textarea {
   margin: 0 auto;
 }
 
+.workspaceClassroom {
+  grid-template-columns: minmax(300px, 360px) minmax(640px, 1fr);
+  grid-template-rows: minmax(640px, calc(100vh - 260px)) 220px;
+  max-width: 1760px;
+}
+
+.workspaceClassroom .controls {
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+}
+
 .panel {
   background: #ffffff;
   border: 1px solid #d9e0e7;
@@ -154,6 +165,20 @@ a.buttonLink:hover {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.slideControls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.slideControls span {
+  min-width: 72px;
+  text-align: center;
+  font-size: 12px;
+  color: #51606f;
 }
 
 .padsGrid {
@@ -285,6 +310,65 @@ a.buttonLink:hover {
   border: 1px solid #cbd5df;
   border-radius: 6px;
   overflow: hidden;
+}
+
+.classroomPanel {
+  padding: 12px;
+}
+
+.classroomStage {
+  --avatar-size: 24%;
+  display: block;
+  background: #101722;
+  padding: 16px;
+  min-height: 0;
+}
+
+.slideStage {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: #0f172a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.slideStage img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: #ffffff;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.28);
+}
+
+.slidePlaceholder {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  color: #cbd5e1;
+  font-size: 14px;
+}
+
+.classroomStage canvas {
+  position: absolute;
+  right: 26px;
+  bottom: 24px;
+  z-index: 3;
+  width: var(--avatar-size);
+  height: auto;
+  max-width: 42%;
+  max-height: 48%;
+  object-fit: contain;
+  filter: drop-shadow(0 14px 22px rgba(15, 23, 42, 0.24));
+}
+
+.classroomStage .cropOverlay {
+  display: none;
 }
 
 .canvasWrapNative {
