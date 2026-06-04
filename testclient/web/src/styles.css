@@ -179,6 +179,46 @@ a.buttonLink:hover {
   font-weight: 650;
 }
 
+.motionPlanPanel em {
+  font-style: normal;
+  font-size: 12px;
+  color: #1d4ed8;
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.motionPlanList {
+  display: grid;
+  gap: 8px;
+}
+
+.motionPlanItem {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 8px;
+  font-size: 12px;
+  color: #51606f;
+}
+
+.motionPlanItem strong {
+  color: #17202a;
+}
+
+.motionPlanItem p {
+  margin: 0;
+  line-height: 1.45;
+  color: #27313b;
+}
+
+.motionPlanItem small {
+  color: #6b7785;
+}
+
 .padControl {
   gap: 4px;
 }
@@ -331,13 +371,17 @@ canvas {
 
 .sourceBar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: end;
 }
 
 .sourceBar button {
   min-width: 120px;
+}
+
+.hiddenFileInput {
+  display: none;
 }
 
 .videoPreviewBox {
@@ -453,6 +497,113 @@ canvas {
 
 .advancedBox[open] summary {
   margin-bottom: 2px;
+}
+
+.facePadTool {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #d9e0e7;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.facePadHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: #334155;
+  font-weight: 650;
+}
+
+.facePadHead button {
+  min-width: 118px;
+}
+
+.facePreviewGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.facePreviewStage {
+  position: relative;
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  background:
+    linear-gradient(45deg, #e5e7eb 25%, transparent 25%),
+    linear-gradient(-45deg, #e5e7eb 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #e5e7eb 75%),
+    linear-gradient(-45deg, transparent 75%, #e5e7eb 75%);
+  background-color: #f8fafc;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+  background-size: 20px 20px;
+}
+
+.facePreviewStage img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.faceBox {
+  position: absolute;
+  pointer-events: none;
+}
+
+.faceBoxBase {
+  border: 1px dashed #2563eb;
+}
+
+.faceBoxPadded {
+  border: 2px solid #ef4444;
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.15);
+}
+
+.facePadControls {
+  display: grid;
+  gap: 10px;
+}
+
+.faceLegend {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #51606f;
+}
+
+.faceLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.faceLegend i {
+  width: 20px;
+  height: 10px;
+  display: inline-block;
+}
+
+.legendBase {
+  border: 1px dashed #2563eb;
+}
+
+.legendPadded {
+  border: 2px solid #ef4444;
+}
+
+.motionPadsGrid label {
+  gap: 5px;
+}
+
+.motionPadsGrid input[type="range"] {
+  padding: 0;
 }
 
 .motionLists {
@@ -583,10 +734,27 @@ canvas {
   min-width: 0;
 }
 
-.clipCardHead button {
+.clipCardActions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.clipCardHead button,
+.clipCardActions button {
   min-height: 30px;
   padding: 5px 8px;
   font-size: 12px;
+}
+
+.dangerButton {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #991b1b;
+}
+
+.dangerButton:hover {
+  background: #ffe4e6;
 }
 
 .clipCard em {

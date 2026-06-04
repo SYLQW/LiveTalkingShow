@@ -42,10 +42,10 @@ python tools\build_speaking_motion_clip.py `
   --display-name 普通讲解 `
   --out-root data\speaking_actions `
   --start 0 `
-  --fps 8 `
+  --fps 30 `
   --img-size 256 `
   --pads 0 10 0 0 `
-  --face-det-batch-size 1 `
+  --face-det-batch-size 8 `
   --use-ffmpeg-cut `
   --ffmpeg-path "G:\ffmpeg\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe" `
   --chroma-key `
@@ -85,6 +85,8 @@ FFmpeg 可执行文件路径。当前本机路径是 G:\ffmpeg\ffmpeg-8.1-essent
 --max-frames
 快速测试时可以限制帧数，正式生成时设为 0 或不填。
 ```
+
+默认生成帧率现在按 `30fps` 处理。这样动作会更流畅一些，也更接近原始视频素材的观感，不过生成出来的帧数会更多，处理时间和素材占用也会变大。要是只是快速试参数，可以临时把 fps 调低；要是准备放进素材库正式使用，建议先用 30。
 
 ## 后端接口
 
@@ -167,11 +169,11 @@ POST /motion/clips/create
   "action_id": "lecture_explain",
   "display_name": "普通讲解",
   "start": 0,
-  "fps": 8,
+  "fps": 30,
   "max_frames": 0,
   "img_size": 256,
   "pads": [0, 10, 0, 0],
-  "face_det_batch_size": 1,
+  "face_det_batch_size": 8,
   "chroma_key": true,
   "use_ffmpeg_cut": true,
   "ffmpeg_path": "G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe",
@@ -230,15 +232,27 @@ http://127.0.0.1:8070/motion.html
 
 `fps`、`img_size`、`pads`、人脸检测批量、绿幕扣除和 FFmpeg 路径放在“生成参数”里。一般操作的时候先不需要动它们，只有嘴部位置、清晰度或者截取方式不对的时候再调。
 
-主测试页里有两组选择：说话动作和静息动作。说话动作只在有语音的时候生效；静息动作只在没有语音的时候生效。
+源视频现在有两种给法：可以手动填写后端机器上的本地视频路径，也可以点“选择视频”把文件上传到后端临时目录。上传后的路径会自动填回页面，并且会继续走加载视频、截取片段、生成动作素材这套流程。
 
-当前前端只支持填写服务器上的本地视频路径，还没有做文件上传。这样做是为了先把制作流程跑通，后面再加上传能力会更稳。
+页面里还有“检查人脸框”。点它以后，会截取当前片段开始点附近的一帧来显示人脸范围。蓝色虚线框是检测器找到的原始人脸框，红色框是加了 `pads` 以后真正拿去生成 `face_imgs` 和 `coords.pkl` 的生成框。拖动上、下、左、右四个滑块，只是在这个检测框基础上调整生成框，方便看清楚 Wav2Lip 到底会截哪一块脸。
+
+主测试页里有两组选择：说话动作和静息动作。说话动作只在有语音的时候生效；静息动作只在没有语音的时候生效。
 
 ## 运行逻辑
 
 说话动作片段只在 `audiotype=0` 的时候生效。后端仍然把当前 TTS 音频送进 Wav2Lip，动作片段只改变 Wav2Lip 使用的 `full_imgs`、`face_imgs` 和 `coords.pkl`。
 
 `audiotype=2`、`audiotype=3` 这类自定义动作仍然适合做不说话的短动作，或者固定话术短片。它们不是这次“边说边动”的主要方式。
+
+## Wav2Lip 模型替换评估
+
+当前主线仍然建议先保留 256 版 Wav2Lip。它的效果不算最清晰，但已经能和现有的动作素材、透明背景、前端贴回方式配合起来，调试成本比较低。
+
+`Wav2Lip_Chinese` 可以先作为小范围测试项。如果它的模型结构和当前 Wav2Lip 一致，那大概率可以通过替换模型文件，或者把 `LIVETALKING_MODELFILE` 指到新的权重来试。它的重点更偏中文口型，可能会让中文发音的嘴型更贴一些，但不一定能明显解决“画面糊”的问题。测试的时候要用同一段视频、同一段 TTS、同一组 `pads` 和同一个 `img_size`，这样才能看出差别。
+
+`Wav2Lip-HD` 对项目影响会更大。很多 HD 方案不是单纯换一个权重，而是把 Wav2Lip、脸部增强、超分或者后处理放在一起跑。这样画质可能更好，但会增加处理时间，也可能需要改推理代码、模型加载方式和结果贴回方式。它更适合先单独开一个实验分支，把离线生成效果跑出来，再决定要不要接回现在的实时页面。
+
+这里也要注意，`pads` 和 `face_det_batch_size` 不是直接提高画质的参数。`pads` 主要决定人脸裁剪范围，框太偏会让嘴跑位，框太大可能让嘴部细节变弱；`face_det_batch_size` 主要影响人脸检测一次处理多少帧，默认改成 8 是为了让检测效率更好一些，但它不会把嘴唇本身变清晰。
 
 ## 当前限制
 

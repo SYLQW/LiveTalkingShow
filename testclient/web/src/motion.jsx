@@ -5,6 +5,7 @@ import {
   Cable,
   CheckCircle2,
   Clock3,
+  Trash2,
   Edit3,
   Film,
   FolderOpen,
@@ -28,6 +29,12 @@ const DEFAULTS = {
   ffmpegPath: 'G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe'
 };
 const INITIAL_CLIP_KIND = URL_PARAMS.get('kind') === 'idle' ? 'idle' : 'speaking';
+const PAD_FIELDS = [
+  { key: 'top', label: '上' },
+  { key: 'bottom', label: '下' },
+  { key: 'left', label: '左' },
+  { key: 'right', label: '右' }
+];
 
 function defaultDraftForKind(kind) {
   if (kind === 'idle') {
@@ -54,6 +61,42 @@ function parsePads(value) {
     .filter((item) => Number.isFinite(item));
   while (values.length < 4) values.push(0);
   return values.slice(0, 4);
+}
+
+function padsToText(values) {
+  const pads = Array.isArray(values) ? values : [0, 10, 0, 0];
+  return pads.slice(0, 4).map((value) => Number.parseInt(value || 0, 10)).join(',');
+}
+
+function padObjectFromText(value) {
+  const [top, bottom, left, right] = parsePads(value);
+  return { top, bottom, left, right };
+}
+
+function boxWithPads(baseBox, pads, width, height) {
+  if (!baseBox || !width || !height) return null;
+  const [top, bottom, left, right] = pads;
+  return {
+    x1: Math.max(0, Math.round(Number(baseBox.x1 || 0) - left)),
+    y1: Math.max(0, Math.round(Number(baseBox.y1 || 0) - top)),
+    x2: Math.min(width, Math.round(Number(baseBox.x2 || 0) + right)),
+    y2: Math.min(height, Math.round(Number(baseBox.y2 || 0) + bottom))
+  };
+}
+
+function boxStyle(box, width, height) {
+  if (!box || !width || !height) return {};
+  return {
+    left: `${(box.x1 / width) * 100}%`,
+    top: `${(box.y1 / height) * 100}%`,
+    width: `${Math.max(1, ((box.x2 - box.x1) / width) * 100)}%`,
+    height: `${Math.max(1, ((box.y2 - box.y1) / height) * 100)}%`
+  };
+}
+
+function formatBox(box) {
+  if (!box) return '-';
+  return `x ${box.x1}-${box.x2}，y ${box.y1}-${box.y2}`;
 }
 
 function toNumber(value, fallback = 0) {
@@ -84,6 +127,19 @@ function buildVideoUrl(baseUrl, videoUrl) {
   return `${baseUrl}${videoUrl.startsWith('/') ? '' : '/'}${videoUrl}`;
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 function makeSegmentId() {
   return `segment_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 }
@@ -104,6 +160,7 @@ function makeUniqueActionId(baseValue, usedIds) {
 
 function App() {
   const videoRef = useRef(null);
+  const sourceFileRef = useRef(null);
   const [liveTalkingUrl, setLiveTalkingUrl] = useState(DEFAULTS.liveTalkingUrl);
   const [sessionId, setSessionId] = useState(DEFAULTS.sessionId);
   const [clips, setClips] = useState([]);
@@ -112,6 +169,7 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [sourceInfo, setSourceInfo] = useState(null);
   const [videoSrc, setVideoSrc] = useState('');
+  const [facePreview, setFacePreview] = useState(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [startMark, setStartMark] = useState(0);
   const [endMark, setEndMark] = useState(0);
@@ -130,11 +188,11 @@ function App() {
     clipKind: INITIAL_CLIP_KIND,
     avatarId: DEFAULTS.avatarId,
     source: DEFAULTS.source,
-    fps: '8',
+    fps: '30',
     maxFrames: '0',
     imgSize: '256',
     pads: '0,10,0,0',
-    faceBatchSize: '1',
+    faceBatchSize: '8',
     chromaKey: true,
     useFfmpegCut: true,
     ffmpegPath: DEFAULTS.ffmpegPath
@@ -154,6 +212,20 @@ function App() {
   const allUsedActionIds = useMemo(
     () => new Set([...existingActionIds, ...queuedActionIds]),
     [existingActionIds, queuedActionIds]
+  );
+  const currentPads = useMemo(() => parsePads(settings.pads), [settings.pads]);
+  const currentPadObject = useMemo(() => padObjectFromText(settings.pads), [settings.pads]);
+  const paddedPreviewBox = useMemo(
+    () => boxWithPads(facePreview?.base_box, currentPads, facePreview?.width, facePreview?.height),
+    [currentPads, facePreview]
+  );
+  const previewBaseStyle = useMemo(
+    () => boxStyle(facePreview?.base_box, facePreview?.width, facePreview?.height),
+    [facePreview]
+  );
+  const previewPaddedStyle = useMemo(
+    () => boxStyle(paddedPreviewBox, facePreview?.width, facePreview?.height),
+    [facePreview, paddedPreviewBox]
   );
   const draftActionId = normalizeActionId(draft.actionId);
   const draftConflict = draftActionId && allUsedActionIds.has(draftActionId);
@@ -177,6 +249,11 @@ function App() {
   const setSetting = useCallback((key, value) => {
     setSettings((current) => ({ ...current, [key]: value }));
   }, []);
+
+  const setPadValue = useCallback((key, value) => {
+    const next = { ...padObjectFromText(settings.pads), [key]: Number.parseInt(value || '0', 10) };
+    setSetting('pads', padsToText([next.top, next.bottom, next.left, next.right]));
+  }, [setSetting, settings.pads]);
 
   const setDraftField = useCallback((key, value) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -287,6 +364,55 @@ function App() {
     }
   }, [addLog, cancelEditClip, editForm, ensureSession, normalized, refreshClips, sessionId, settings.avatarId, settings.clipKind]);
 
+  const deleteClip = useCallback(async (clip) => {
+    const actionId = normalizeActionId(clip?.action_id);
+    if (!actionId) return;
+    const displayName = clip?.display_name || actionId;
+    const ok = window.confirm(`确定要删除素材“${displayName}”吗？\n\n删除后会把这个动作片段的文件夹一起删掉。`);
+    if (!ok) return;
+
+    setBusy(`delete_${actionId}`);
+    setStatus(`正在删除 ${actionId}`);
+    try {
+      const activeSessionId = sessionId || await ensureSession();
+      const resp = await fetch(`${normalized}/motion/clips/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid: activeSessionId,
+          avatar_id: settings.avatarId.trim(),
+          kind: settings.clipKind,
+          action_id: actionId
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'delete failed');
+      if (Array.isArray(payload.data?.clips)) {
+        setClips(payload.data.clips);
+      } else {
+        await refreshClips(activeSessionId);
+      }
+      if (editingClip === actionId) cancelEditClip();
+      setStatus(`${actionId} 已删除`);
+      addLog('素材已删除', payload.data?.deleted || { action_id: actionId });
+    } catch (error) {
+      setStatus(`${actionId} 删除失败`);
+      addLog('删除素材失败', { action_id: actionId, error: String(error) });
+    } finally {
+      setBusy('');
+    }
+  }, [
+    addLog,
+    cancelEditClip,
+    editingClip,
+    ensureSession,
+    normalized,
+    refreshClips,
+    sessionId,
+    settings.avatarId,
+    settings.clipKind
+  ]);
+
   const checkBackend = useCallback(async () => {
     setStatus('正在连接后端');
     try {
@@ -300,8 +426,8 @@ function App() {
     }
   }, [addLog, ensureSession, refreshClips]);
 
-  const loadSource = useCallback(async () => {
-    const source = settings.source.trim();
+  const loadSource = useCallback(async (sourceOverride = '') => {
+    const source = String(sourceOverride || settings.source).trim();
     if (!source) {
       addLog('请先填写视频路径');
       return;
@@ -342,6 +468,78 @@ function App() {
       setBusy('');
     }
   }, [addLog, normalized, settings.ffmpegPath, settings.source]);
+
+  const chooseSourceFile = useCallback(() => {
+    sourceFileRef.current?.click();
+  }, []);
+
+  const uploadSourceFile = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setBusy('upload');
+    setStatus('正在上传视频');
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const resp = await fetch(`${normalized}/motion/source/upload`, {
+        method: 'POST',
+        body: formData
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'upload failed');
+      const source = String(payload.data?.source || '');
+      if (!source) throw new Error('upload source path missing');
+      setSetting('source', source);
+      addLog('视频已选择', {
+        filename: payload.data?.filename || file.name,
+        size: payload.data?.size
+      });
+      await loadSource(source);
+    } catch (error) {
+      setStatus('视频选择失败');
+      addLog('视频选择失败', { error: String(error) });
+    } finally {
+      setBusy('');
+    }
+  }, [addLog, loadSource, normalized, setSetting]);
+
+  const detectFacePreview = useCallback(async () => {
+    const source = settings.source.trim();
+    if (!source) {
+      addLog('请先选择或填写视频路径');
+      return;
+    }
+    setBusy('detect');
+    setStatus('正在检测人脸框');
+    try {
+      const resp = await fetchWithTimeout(`${normalized}/motion/source/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source,
+          pads: currentPads,
+          time: startMark || 0,
+          chroma_key: settings.chromaKey
+        })
+      }, 30000);
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'detect failed');
+      setFacePreview(payload.data || null);
+      setStatus('人脸框已检测');
+      addLog('人脸框已检测', {
+        base: payload.data?.base_box,
+        padded: payload.data?.padded_box
+      });
+    } catch (error) {
+      setFacePreview(null);
+      setStatus('人脸框检测失败');
+      addLog('人脸框检测失败', { error: String(error) });
+    } finally {
+      setBusy('');
+    }
+  }, [addLog, currentPads, normalized, settings.chromaKey, settings.source, startMark]);
 
   const seekTo = useCallback((value) => {
     const nextValue = Math.min(Math.max(0, toNumber(value)), duration || 0);
@@ -459,11 +657,11 @@ function App() {
           display_name: String(segment.displayName || '').trim(),
           start: toNumber(segment.start),
           end: toNumber(segment.end),
-          fps: toNumber(settings.fps, 8),
+          fps: toNumber(settings.fps, 30),
           max_frames: Number.parseInt(settings.maxFrames || '0', 10),
           img_size: Number.parseInt(settings.imgSize || '256', 10),
           pads: parsePads(settings.pads),
-          face_det_batch_size: Number.parseInt(settings.faceBatchSize || '1', 10),
+          face_det_batch_size: Number.parseInt(settings.faceBatchSize || '8', 10),
           tags: segment.tags || draft.tags,
           best_for: segment.bestFor || draft.bestFor,
           chroma_key: settings.chromaKey,
@@ -536,8 +734,18 @@ function App() {
                   placeholder="G:/数字人/数字人原型/视频素材/xxx.mp4"
                 />
               </label>
-              <button type="button" onClick={loadSource} disabled={busy === 'probe'}>
-                <FolderOpen size={16} />{busy === 'probe' ? '加载中' : '加载视频'}
+              <input
+                ref={sourceFileRef}
+                className="hiddenFileInput"
+                type="file"
+                accept="video/*"
+                onChange={uploadSourceFile}
+              />
+              <button type="button" onClick={chooseSourceFile} disabled={busy === 'upload' || busy === 'probe'}>
+                <FolderOpen size={16} />{busy === 'upload' ? '上传中' : '选择视频'}
+              </button>
+              <button type="button" onClick={() => loadSource()} disabled={busy === 'probe'}>
+                <Video size={16} />{busy === 'probe' ? '加载中' : '加载视频'}
               </button>
             </div>
 
@@ -717,6 +925,46 @@ function App() {
                 pads
                 <input value={settings.pads} onChange={(event) => setSetting('pads', event.target.value)} />
               </label>
+              <div className="facePadTool">
+                <div className="facePadHead">
+                  <span>人脸框预览</span>
+                  <button type="button" onClick={detectFacePreview} disabled={!settings.source.trim() || busy === 'detect'}>
+                    <RefreshCw size={15} />{busy === 'detect' ? '检测中' : '检查人脸框'}
+                  </button>
+                </div>
+                {facePreview?.image ? (
+                  <div className="facePreviewGrid">
+                    <div className="facePreviewStage">
+                      <img src={facePreview.image} alt="首帧人脸框预览" />
+                      <div className="faceBox faceBoxBase" style={previewBaseStyle} />
+                      <div className="faceBox faceBoxPadded" style={previewPaddedStyle} />
+                    </div>
+                    <div className="facePadControls">
+                      <div className="faceLegend">
+                        <span><i className="legendBase" />检测框：{formatBox(facePreview.base_box)}</span>
+                        <span><i className="legendPadded" />生成框：{formatBox(paddedPreviewBox)}</span>
+                      </div>
+                      <div className="padsGrid motionPadsGrid">
+                        {PAD_FIELDS.map(({ key, label }) => (
+                          <label key={key}>
+                            <span>{label} {currentPadObject[key]}</span>
+                            <input
+                              type="range"
+                              min="-220"
+                              max="220"
+                              step="1"
+                              value={currentPadObject[key]}
+                              onChange={(event) => setPadValue(key, event.target.value)}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <span className="fieldHint">点“检查人脸框”后，会用片段开始点附近的一帧显示检测框和生成框。</span>
+                )}
+              </div>
               <label>
                 FFmpeg
                 <input value={settings.ffmpegPath} onChange={(event) => setSetting('ffmpegPath', event.target.value)} />
@@ -796,9 +1044,19 @@ function App() {
                       <strong>{clip.display_name || clip.action_id}</strong>
                       <span>{clip.action_id}</span>
                     </div>
-                    <button type="button" onClick={() => beginEditClip(clip)} disabled={!!busy}>
-                      <Edit3 size={14} />编辑
-                    </button>
+                    <div className="clipCardActions">
+                      <button type="button" onClick={() => beginEditClip(clip)} disabled={!!busy}>
+                        <Edit3 size={14} />编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="dangerButton"
+                        onClick={() => deleteClip(clip)}
+                        disabled={!!busy}
+                      >
+                        <Trash2 size={14} />{busy === `delete_${clip.action_id}` ? '删除中' : '删除'}
+                      </button>
+                    </div>
                   </div>
                   <span>{clip.frame_count || 0} 帧 / {clip.fps || '-'} fps</span>
                   {clip.description && <span>{clip.description}</span>}

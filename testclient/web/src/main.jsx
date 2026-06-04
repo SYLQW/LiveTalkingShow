@@ -21,6 +21,7 @@ function paramOrEnv(paramName, envName, fallback) {
 
 const DEFAULTS = {
   liveTalkingUrl: DEFAULT_LIVETALKING_URL,
+  avatarId: import.meta.env.VITE_AVATAR_ID || 'mute_teacher_motion_v1_pad01000',
   ttsServerUrl: import.meta.env.VITE_TTS_SERVER_URL || 'http://127.0.0.1:8036',
   alphaInputWs: import.meta.env.VITE_ALPHA_INPUT_WS || wsUrl(DEFAULT_LIVETALKING_URL, '/alpha/input/audio'),
   text: import.meta.env.VITE_DEFAULT_TEXT || '这是一段 robottts 兼容接口流式测试。',
@@ -45,6 +46,15 @@ const PAD_LABELS = {
   right: '右'
 };
 const PAD_KEYS = ['top', 'bottom', 'left', 'right'];
+
+function waitMs(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function estimateSpeakMs(value) {
+  const textLength = String(value || '').replace(/\s+/g, '').length;
+  return Math.max(1800, Math.min(12000, textLength * 180));
+}
 
 function padsFromArray(values) {
   const source = Array.isArray(values) ? values : [0, 0, 0, 0];
@@ -113,6 +123,9 @@ function App() {
   const [frameInfo, setFrameInfo] = useState({ width: 0, height: 0, seq: 0, fps: 0 });
   const [audioInfo, setAudioInfo] = useState({ chunks: 0, bytes: 0 });
   const [logs, setLogs] = useState([]);
+  const [motionPlan, setMotionPlan] = useState([]);
+  const [motionPlanProvider, setMotionPlanProvider] = useState('');
+  const [motionPlanRunning, setMotionPlanRunning] = useState(false);
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
   const socketRef = useRef(null);
@@ -124,6 +137,7 @@ function App() {
   const drawingFrameRef = useRef(false);
   const lastVideoDrawAtRef = useRef(0);
   const alphaAutoStartedRef = useRef(false);
+  const motionPlanStopRef = useRef(false);
   const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
   const audioStatsRef = useRef({ chunks: 0, bytes: 0, lastUpdateAt: 0 });
 
@@ -435,8 +449,12 @@ function App() {
 
   const refreshMotionClips = useCallback(async (targetSessionId = sessionId) => {
     try {
-      const query = targetSessionId ? `?sessionid=${encodeURIComponent(targetSessionId)}` : '';
-      const resp = await fetch(`${normalized.live}/motion/clips${query}${query ? '&' : '?'}kind=speaking`);
+      const query = new URLSearchParams({
+        kind: 'speaking',
+        avatar_id: DEFAULTS.avatarId
+      });
+      if (targetSessionId) query.set('sessionid', targetSessionId);
+      const resp = await fetch(`${normalized.live}/motion/clips?${query.toString()}`);
       const payload = await resp.json();
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'motion clips failed');
       const clips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
@@ -453,8 +471,12 @@ function App() {
 
   const refreshIdleClips = useCallback(async (targetSessionId = sessionId) => {
     try {
-      const query = targetSessionId ? `?sessionid=${encodeURIComponent(targetSessionId)}` : '';
-      const resp = await fetch(`${normalized.live}/motion/clips${query}${query ? '&' : '?'}kind=idle`);
+      const query = new URLSearchParams({
+        kind: 'idle',
+        avatar_id: DEFAULTS.avatarId
+      });
+      if (targetSessionId) query.set('sessionid', targetSessionId);
+      const resp = await fetch(`${normalized.live}/motion/clips?${query.toString()}`);
       const payload = await resp.json();
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'idle clips failed');
       const clips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
@@ -512,6 +534,140 @@ function App() {
       addLog('选择静息动作失败', { error: String(error) });
     }
   }, [addLog, normalized.live, refreshIdleClips, sessionId]);
+
+  const ensureAlphaSession = useCallback(async () => {
+    if (sessionId) return sessionId;
+    const resp = await fetch(`${normalized.live}/alpha/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reuse: true })
+    });
+    const payload = await resp.json();
+    if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'session failed');
+    const nextSessionId = String(payload.data.sessionid || '');
+    setSessionId(nextSessionId);
+    syncTuning(nextSessionId);
+    refreshMotionClips(nextSessionId);
+    refreshIdleClips(nextSessionId);
+    return nextSessionId;
+  }, [normalized.live, refreshIdleClips, refreshMotionClips, sessionId, syncTuning]);
+
+  const planMotions = useCallback(async () => {
+    const content = text.trim();
+    if (!content) {
+      addLog('请先输入讲课文本');
+      return;
+    }
+    setStatus('planning');
+    setMotionPlanProvider('');
+    try {
+      const activeSessionId = await ensureAlphaSession();
+      const resp = await fetch(`${normalized.live}/motion/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid: activeSessionId,
+          text: content,
+          max_segments: 8,
+          use_llm: true
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'motion plan failed');
+      const nextPlan = Array.isArray(payload.data?.plan) ? payload.data.plan : [];
+      setMotionPlan(nextPlan);
+      setMotionPlanProvider(payload.data?.provider || '');
+      setStatus(`已生成 ${nextPlan.length} 段动作计划`);
+      addLog('动作编排已生成', {
+        provider: payload.data?.provider,
+        count: nextPlan.length,
+        llm_error: payload.data?.llm_error || undefined
+      });
+    } catch (error) {
+      setStatus('动作编排失败');
+      addLog('动作编排失败', { error: String(error) });
+    }
+  }, [addLog, ensureAlphaSession, normalized.live, text]);
+
+  const speakPlannedMotions = useCallback(async () => {
+    if (motionPlan.length === 0) {
+      addLog('还没有动作计划，请先点击编排动作');
+      return;
+    }
+    motionPlanStopRef.current = false;
+    setMotionPlanRunning(true);
+    setStatus('按计划讲课中');
+    let activeSessionId = sessionId;
+    try {
+      activeSessionId = await ensureAlphaSession();
+      for (let index = 0; index < motionPlan.length; index += 1) {
+        if (motionPlanStopRef.current) break;
+        const item = motionPlan[index];
+        const actionId = String(item.action_id || '').trim();
+        const segmentText = String(item.text || '').trim();
+        if (!segmentText) continue;
+
+        if (actionId) {
+          setSelectedMotion(actionId);
+          const selectResp = await fetch(`${normalized.live}/motion/select`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionid: activeSessionId,
+              kind: 'speaking',
+              action_id: actionId
+            })
+          });
+          const selectPayload = await selectResp.json();
+          if (!selectResp.ok || selectPayload.code !== 0) {
+            throw new Error(selectPayload.msg || `select ${actionId} failed`);
+          }
+        }
+
+        const speakResp = await fetch(`${normalized.live}/alpha/speak`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: segmentText,
+            type: 'echo',
+            interrupt: index === 0,
+            sessionid: activeSessionId,
+            tts: {
+              voice_id: voiceId,
+              prompts,
+              mode
+            }
+          })
+        });
+        const speakPayload = await speakResp.json();
+        if (!speakResp.ok || speakPayload.code !== 0) throw new Error(speakPayload.msg || 'speak failed');
+        addLog('计划片段已提交', {
+          index: index + 1,
+          action_id: actionId,
+          text: segmentText
+        });
+        await waitMs(estimateSpeakMs(segmentText));
+      }
+      setStatus(motionPlanStopRef.current ? '动作计划已停止' : '动作计划讲课完成');
+    } catch (error) {
+      setStatus('动作计划执行失败');
+      addLog('动作计划执行失败', { error: String(error) });
+    } finally {
+      setMotionPlanRunning(false);
+      motionPlanStopRef.current = false;
+      refreshMotionClips(activeSessionId);
+    }
+  }, [
+    addLog,
+    ensureAlphaSession,
+    mode,
+    motionPlan,
+    normalized.live,
+    prompts,
+    refreshMotionClips,
+    sessionId,
+    voiceId
+  ]);
 
   const updatePads = useCallback(async (nextPads) => {
     setPads(nextPads);
@@ -618,6 +774,8 @@ function App() {
   };
 
   const interrupt = async () => {
+    motionPlanStopRef.current = true;
+    setMotionPlanRunning(false);
     try {
       await fetch(`${normalized.live}/interrupt_talk`, {
         method: 'POST',
@@ -838,6 +996,32 @@ function App() {
             Text
             <textarea value={text} onChange={(event) => setText(event.target.value)} />
           </label>
+
+          <div className="tuningPanel motionPlanPanel">
+            <div className="controlHeader">
+              <span><SlidersHorizontal size={16} />动作编排</span>
+              {motionPlanProvider && <em>{motionPlanProvider === 'llm' ? '大模型' : '规则兜底'}</em>}
+            </div>
+            <div className="buttons">
+              <button type="button" onClick={planMotions}>
+                <Send size={16} />编排动作
+              </button>
+              <button type="button" onClick={speakPlannedMotions} disabled={motionPlanRunning || motionPlan.length === 0}>
+                <Play size={16} />{motionPlanRunning ? '执行中' : '按计划讲课'}
+              </button>
+            </div>
+            <div className="motionPlanList">
+              {motionPlan.length === 0 && <span className="clipEmpty">暂无动作计划</span>}
+              {motionPlan.map((item, index) => (
+                <div className="motionPlanItem" key={`${item.action_id || 'action'}_${index}`}>
+                  <strong>{index + 1}. {item.display_name || item.action_id || '默认动作'}</strong>
+                  <span>{item.action_id || 'default'}</span>
+                  <p>{item.text}</p>
+                  {item.reason && <small>{item.reason}</small>}
+                </div>
+              ))}
+            </div>
+          </div>
 
           <div className="buttons">
             <button onClick={checkHealth}><Cable size={16} />检查</button>

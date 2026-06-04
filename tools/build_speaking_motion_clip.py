@@ -248,6 +248,18 @@ def detect_boxes(
     return [(int(x1), int(y1), int(x2), int(y2)) for x1, y1, x2, y2 in boxes_array]
 
 
+def fixed_boxes(
+    frames: list[np.ndarray],
+    box: list[int] | tuple[int, int, int, int],
+) -> list[tuple[int, int, int, int]]:
+    if len(box) != 4:
+        raise RuntimeError(f"fixed face box must have 4 values: {box}")
+    x1, y1, x2, y2 = [int(value) for value in box]
+    if x2 <= x1 or y2 <= y1:
+        raise RuntimeError(f"invalid fixed face box: {box}")
+    return [(x1, y1, x2, y2) for _ in frames]
+
+
 def make_preview(frame: np.ndarray, box: tuple[int, int, int, int], label: str) -> np.ndarray:
     if frame.ndim == 3 and frame.shape[2] == 4:
         bgr = frame[:, :, :3]
@@ -304,12 +316,15 @@ def build_clip(args: argparse.Namespace) -> None:
         chroma_key=args.chroma_key,
         max_frames=args.max_frames,
     )
-    boxes = detect_boxes(
-        frames=frames,
-        pads=args.pads,
-        batch_size=args.face_det_batch_size,
-        nosmooth=args.nosmooth,
-    )
+    if getattr(args, "fixed_face_box", None):
+        boxes = fixed_boxes(frames, args.fixed_face_box)
+    else:
+        boxes = detect_boxes(
+            frames=frames,
+            pads=args.pads,
+            batch_size=args.face_det_batch_size,
+            nosmooth=args.nosmooth,
+        )
 
     resampling = cv2.INTER_AREA
     coords = []
@@ -341,6 +356,7 @@ def build_clip(args: argparse.Namespace) -> None:
         "frame_count": len(frames),
         "img_size": args.img_size,
         "pads": args.pads,
+        "fixed_face_box": list(args.fixed_face_box) if getattr(args, "fixed_face_box", None) else [],
         "loop": not args.no_loop,
         "tags": [tag.strip() for tag in args.tags.split(",") if tag.strip()],
         "best_for": args.best_for,
@@ -371,6 +387,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--img-size", type=int, default=256)
     parser.add_argument("--pads", nargs=4, type=int, default=[0, 10, 0, 0], metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"))
     parser.add_argument("--face-det-batch-size", type=int, default=8)
+    parser.add_argument("--fixed-face-box", nargs=4, type=int, metavar=("X1", "Y1", "X2", "Y2"))
     parser.add_argument("--max-frames", type=int, default=0, help="Limit frames for quick tests; 0 means no limit.")
     parser.add_argument("--tags", default="speaking,teaching")
     parser.add_argument("--best-for", default="")
