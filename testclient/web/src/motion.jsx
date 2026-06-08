@@ -207,10 +207,12 @@ function buildVideoUrl(baseUrl, videoUrl) {
   return `${baseUrl}${videoUrl.startsWith('/') ? '' : '/'}${videoUrl}`;
 }
 
-function buildSourcePreviewUrl(baseUrl, source) {
+function buildSourcePreviewUrl(baseUrl, source, version = '') {
   const value = String(source || '').trim();
   if (!value) return '';
-  return `${baseUrl}/motion/source/video?source=${encodeURIComponent(value)}&t=${Date.now()}`;
+  const query = new URLSearchParams({ source: value });
+  if (version) query.set('v', String(version));
+  return `${baseUrl}/motion/source/video?${query.toString()}`;
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
@@ -224,6 +226,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function makeSegmentId() {
@@ -817,47 +823,74 @@ function App() {
       steps: [
         settings.useFfmpegCut ? '先用 FFmpeg 截出当前片段' : '直接从源视频取当前时间段',
         '检测人脸并按 pads 得到生成框',
-        `用 Wav2Lip 生成嘴型，img_size=${settings.imgSize}`,
+        `写入 Wav2Lip 要用的人脸素材，img_size=${settings.imgSize}`,
         settings.chromaKey ? '把绿色背景扣成透明输出' : '保留原视频背景',
         '写入素材库并刷新列表'
       ]
     });
     try {
       const activeSessionId = sessionId || await ensureSession();
-      const resp = await fetch(`${normalized}/motion/clips/create`, {
+      const createBody = {
+        sessionid: activeSessionId,
+        avatar_id: settings.avatarId.trim(),
+        kind: settings.clipKind,
+        source: settings.source.trim(),
+        action_id: String(segment.actionId).trim(),
+        display_name: String(segment.displayName || '').trim(),
+        start: toNumber(segment.start),
+        end: toNumber(segment.end),
+        fps: toNumber(settings.fps, 30),
+        max_frames: Number.parseInt(settings.maxFrames || '0', 10),
+        img_size: Number.parseInt(settings.imgSize || '256', 10),
+        pads: parsePads(settings.pads),
+        face_det_batch_size: Number.parseInt(settings.faceBatchSize || '8', 10),
+        tags: segment.tags || draft.tags,
+        best_for: segment.bestFor || draft.bestFor,
+        play_mode: segment.playMode || draft.playMode,
+        can_reverse: segment.canReverse ?? draft.canReverse,
+        weight: toNumber(segment.weight ?? draft.weight, 1),
+        min_cycles: Number.parseInt(segment.minCycles || draft.minCycles || '1', 10),
+        max_cycles: Number.parseInt(segment.maxCycles || draft.maxCycles || draft.minCycles || '1', 10),
+        switch_at_boundary: segment.switchAtBoundary ?? draft.switchAtBoundary,
+        enabled: segment.enabled ?? draft.enabled,
+        chroma_key: settings.chromaKey,
+        use_ffmpeg_cut: settings.useFfmpegCut,
+        ffmpeg_path: settings.ffmpegPath,
+        overwrite: false
+      };
+      const resp = await fetch(`${normalized}/motion/clips/create-task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionid: activeSessionId,
-          avatar_id: settings.avatarId.trim(),
-          kind: settings.clipKind,
-          source: settings.source.trim(),
-          action_id: String(segment.actionId).trim(),
-          display_name: String(segment.displayName || '').trim(),
-          start: toNumber(segment.start),
-          end: toNumber(segment.end),
-          fps: toNumber(settings.fps, 30),
-          max_frames: Number.parseInt(settings.maxFrames || '0', 10),
-          img_size: Number.parseInt(settings.imgSize || '256', 10),
-          pads: parsePads(settings.pads),
-          face_det_batch_size: Number.parseInt(settings.faceBatchSize || '8', 10),
-          tags: segment.tags || draft.tags,
-          best_for: segment.bestFor || draft.bestFor,
-          play_mode: segment.playMode || draft.playMode,
-          can_reverse: segment.canReverse ?? draft.canReverse,
-          weight: toNumber(segment.weight ?? draft.weight, 1),
-          min_cycles: Number.parseInt(segment.minCycles || draft.minCycles || '1', 10),
-          max_cycles: Number.parseInt(segment.maxCycles || draft.maxCycles || draft.minCycles || '1', 10),
-          switch_at_boundary: segment.switchAtBoundary ?? draft.switchAtBoundary,
-          enabled: segment.enabled ?? draft.enabled,
-          chroma_key: settings.chromaKey,
-          use_ffmpeg_cut: settings.useFfmpegCut,
-          ffmpeg_path: settings.ffmpegPath,
-          overwrite: false
-        })
+        body: JSON.stringify(createBody)
       });
       const payload = await resp.json();
-      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'create failed');
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'create task failed');
+      const taskId = payload.data?.task_id;
+      if (!taskId) throw new Error('task id missing');
+      addLog('生成任务已开始', { action_id: segment.actionId, task_id: taskId });
+
+      let task = payload.data?.task || {};
+      for (let index = 0; index < 600; index += 1) {
+        const taskResp = await fetch(`${normalized}/motion/tasks/${taskId}`);
+        const taskPayload = await taskResp.json();
+        if (!taskResp.ok || taskPayload.code !== 0) throw new Error(taskPayload.msg || 'task status failed');
+        task = taskPayload.data || {};
+        const taskMessage = task.message || '正在生成动作素材';
+        setStatus(taskMessage);
+        setWorkHint({
+          title: taskMessage,
+          steps: [
+            `任务状态：${task.status || '-'}`,
+            `当前步骤：${task.step || '-'}`,
+            '页面每秒检查一次后端状态',
+            '完成后会自动刷新素材库'
+          ]
+        });
+        if (task.status === 'succeeded') break;
+        if (task.status === 'failed') throw new Error(task.error || 'create failed');
+        await wait(1000);
+      }
+      if (task.status !== 'succeeded') throw new Error('生成任务超时');
       setStatus(`${segment.actionId} 已生成`);
       setWorkHint({
         title: `${segment.actionId} 已生成`,
@@ -869,9 +902,9 @@ function App() {
         ]
       });
       updateSegment(segment.localId, 'generated', true);
-      addLog('片段已生成到素材库', payload.data?.metadata || {});
-      if (Array.isArray(payload.data?.clips)) {
-        setClips(payload.data.clips);
+      addLog('片段已生成到素材库', task.result?.metadata || {});
+      if (Array.isArray(task.result?.clips)) {
+        setClips(task.result.clips);
       } else {
         await refreshClips(activeSessionId);
       }
@@ -1311,7 +1344,8 @@ function App() {
               {clips.map((clip) => {
                 const paramTags = clipParamTags(clip);
                 const clipDate = formatClipDate(clip.created_at || clip.updated_at);
-                const previewUrl = buildSourcePreviewUrl(normalized, clip.cut_video);
+                const previewVersion = clip.updated_at || clip.created_at || clip.frame_count || '';
+                const previewUrl = buildSourcePreviewUrl(normalized, clip.cut_video, previewVersion);
                 return (
                 <div className="clipCard" key={clip.action_id}>
                   {previewUrl && (

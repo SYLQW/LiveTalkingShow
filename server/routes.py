@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,9 @@ MOTION_ALLOWED_SOURCE_DIRS = ("tmp/uploaded_sources", "data")
 MOTION_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 MOTION_PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
 AVATAR_MOTION_CONFIG = "motion.json"
+MOTION_TASKS: dict[str, dict] = {}
+MOTION_TASK_LOCK = threading.Lock()
+MOTION_TASK_MAX_ITEMS = 100
 
 
 @dataclass
@@ -713,6 +717,28 @@ def _fallback_motion_action(clips: list[dict]) -> str:
         if matched and matched.get("action_id"):
             return str(matched["action_id"])
     return str(clips[0].get("action_id", ""))
+
+
+def _set_motion_task(task_id: str, **updates) -> None:
+    with MOTION_TASK_LOCK:
+        current = MOTION_TASKS.setdefault(task_id, {})
+        current.update(updates)
+        current["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        while len(MOTION_TASKS) > MOTION_TASK_MAX_ITEMS:
+            oldest_id = next(iter(MOTION_TASKS))
+            if oldest_id == task_id and len(MOTION_TASKS) > 1:
+                oldest_id = next(item for item in MOTION_TASKS if item != task_id)
+            MOTION_TASKS.pop(oldest_id, None)
+
+
+def _get_motion_task(task_id: str) -> dict | None:
+    with MOTION_TASK_LOCK:
+        task = MOTION_TASKS.get(task_id)
+        return dict(task) if task else None
+
+
+def _motion_task_step(task_id: str, step: str, message: str) -> None:
+    _set_motion_task(task_id, status="running", step=step, message=message)
 
 
 def _split_motion_text(text: str, max_segments: int = 8) -> list[str]:
@@ -1549,114 +1575,185 @@ async def motion_delete_clip(request):
         return json_error(str(e))
 
 
+async def _create_motion_clip_data(params: dict, task_id: str = "") -> dict:
+    kind = _motion_kind(params)
+    sessionid = str(params.get("sessionid", "")).strip() or session_manager.default_alpha_sessionid
+    avatar_session = params.get("_avatar_session")
+    if avatar_session is None and params.get("_request") is not None and sessionid:
+        avatar_session = get_session(params.get("_request"), sessionid)
+    avatar_id = str(params.get("avatar_id", "")).strip()
+    if not avatar_id and avatar_session is not None:
+        avatar_id = str(getattr(avatar_session.opt, "avatar_id", "")).strip()
+    avatar_id = _clean_motion_id(avatar_id, "avatar_id")
+    action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
+
+    if task_id:
+        _motion_task_step(task_id, "prepare", "正在检查参数和源视频")
+    source_path = _motion_source_path(params.get("source", ""))
+    _ensure_motion_build_source(source_path)
+    source = str(source_path)
+    if not source:
+        raise ValueError("source is required")
+
+    explicit_out_root = str(params.get("out_root", "")).strip()
+    target_root = _motion_create_clip_root(avatar_id, kind, explicit_out_root)
+    out_root = str(target_root.parent)
+    default_play_mode = _request_motion_default_play_mode(avatar_id, kind, explicit_out_root, create=True)
+    target_dir = target_root / action_id
+    if target_dir.exists() and not (target_dir / "metadata.json").exists():
+        logger.info("remove incomplete motion clip before rebuild: %s", target_dir)
+        shutil.rmtree(target_dir)
+
+    fixed_face_box = _motion_box(params.get("fixed_face_box"))
+    use_fixed_face_box = _bool_param(params.get("use_fixed_face_box"), False)
+    if not fixed_face_box and use_fixed_face_box:
+        if task_id:
+            _motion_task_step(task_id, "detect", "正在根据首帧和 pads 生成固定人脸框")
+        preview = await asyncio.to_thread(
+            _detect_motion_preview,
+            source,
+            _motion_pads(params),
+            float(params.get("start", 0) or 0),
+            _bool_param(params.get("chroma_key"), False),
+        )
+        padded_box = preview.get("padded_box") or {}
+        fixed_face_box = [
+            int(padded_box.get("x1", 0)),
+            int(padded_box.get("y1", 0)),
+            int(padded_box.get("x2", 0)),
+            int(padded_box.get("y2", 0)),
+        ]
+
+    args = SimpleNamespace(
+        source=source,
+        avatar_id=avatar_id,
+        action_id=action_id,
+        display_name=str(params.get("display_name", "")).strip(),
+        out_root=out_root,
+        start=float(params.get("start", 0) or 0),
+        end=float(params["end"]) if params.get("end") not in (None, "") else None,
+        fps=float(params.get("fps", 25) or 25),
+        img_size=int(params.get("img_size", 256) or 256),
+        pads=_motion_pads(params),
+        face_det_batch_size=int(params.get("face_det_batch_size", 8) or 8),
+        fixed_face_box=fixed_face_box,
+        max_frames=int(params.get("max_frames", 0) or 0),
+        tags=str(params.get("tags", "idle,teaching" if kind == "idle" else "speaking,teaching")),
+        best_for=str(params.get("best_for", "")),
+        play_mode=_motion_play_mode(params.get("play_mode"), default_play_mode),
+        can_reverse=_bool_param(params.get("can_reverse"), False),
+        weight=_float_param(params.get("weight"), 1.0, 0.0, 1000.0),
+        min_cycles=_int_param(params.get("min_cycles"), 1, 1, 100),
+        max_cycles=_int_param(params.get("max_cycles"), _int_param(params.get("min_cycles"), 1, 1, 100), 1, 100),
+        switch_at_boundary=_bool_param(params.get("switch_at_boundary"), True),
+        enabled=_bool_param(params.get("enabled"), True),
+        chroma_key=_bool_param(params.get("chroma_key"), False),
+        use_ffmpeg_cut=_bool_param(params.get("use_ffmpeg_cut"), False),
+        ffmpeg_path=_default_ffmpeg_path(params.get("ffmpeg_path", "")),
+        nosmooth=_bool_param(params.get("nosmooth"), False),
+        no_loop=_bool_param(params.get("no_loop"), False),
+        overwrite=_bool_param(params.get("overwrite"), False),
+    )
+
+    from tools.build_speaking_motion_clip import build_clip
+
+    try:
+        if task_id:
+            _motion_task_step(task_id, "build", "正在截取视频、检测人脸并写入动作素材帧")
+        await asyncio.to_thread(build_clip, args)
+    except Exception:
+        if target_dir.exists() and not (target_dir / "metadata.json").exists():
+            logger.info("remove incomplete motion clip after failed build: %s", target_dir)
+            shutil.rmtree(target_dir)
+        raise
+    if task_id:
+        _motion_task_step(task_id, "metadata", "正在写入素材信息并刷新素材库")
+    metadata_path = target_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["kind"] = kind
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+        _sync_avatar_motion_clip_config(avatar_id, kind, action_id, metadata)
+    clips = None
+    reload_method = "reload_idle_motions" if kind == "idle" else "reload_speaking_motions"
+    if avatar_session is not None and hasattr(avatar_session, reload_method):
+        clips = getattr(avatar_session, reload_method)()
+
+    return {
+        "sessionid": sessionid,
+        "kind": kind,
+        "metadata": metadata,
+        "clips": clips,
+    }
+
+
 async def motion_create_clip(request):
     """Create a speaking or idle motion clip from a local source video or image directory."""
     try:
         params = await read_json_params(request)
-        kind = _motion_kind(params)
-        sessionid = str(params.get("sessionid", "")).strip() or session_manager.default_alpha_sessionid
-        avatar_session = get_session(request, sessionid) if sessionid else None
-        avatar_id = str(params.get("avatar_id", "")).strip()
-        if not avatar_id and avatar_session is not None:
-            avatar_id = str(getattr(avatar_session.opt, "avatar_id", "")).strip()
-        avatar_id = _clean_motion_id(avatar_id, "avatar_id")
-        action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
-
-        source_path = _motion_source_path(params.get("source", ""))
-        _ensure_motion_build_source(source_path)
-        source = str(source_path)
-        if not source:
-            return json_error("source is required")
-
-        explicit_out_root = str(params.get("out_root", "")).strip()
-        target_root = _motion_create_clip_root(avatar_id, kind, explicit_out_root)
-        default_play_mode = _request_motion_default_play_mode(avatar_id, kind, explicit_out_root, create=True)
-        target_dir = target_root / action_id
-        if target_dir.exists() and not (target_dir / "metadata.json").exists():
-            logger.info("remove incomplete motion clip before rebuild: %s", target_dir)
-            shutil.rmtree(target_dir)
-
-        fixed_face_box = _motion_box(params.get("fixed_face_box"))
-        use_fixed_face_box = _bool_param(params.get("use_fixed_face_box"), False)
-        if not fixed_face_box and use_fixed_face_box:
-            preview = await asyncio.to_thread(
-                _detect_motion_preview,
-                source,
-                _motion_pads(params),
-                float(params.get("start", 0) or 0),
-                _bool_param(params.get("chroma_key"), False),
-            )
-            padded_box = preview.get("padded_box") or {}
-            fixed_face_box = [
-                int(padded_box.get("x1", 0)),
-                int(padded_box.get("y1", 0)),
-                int(padded_box.get("x2", 0)),
-                int(padded_box.get("y2", 0)),
-            ]
-
-        args = SimpleNamespace(
-            source=source,
-            avatar_id=avatar_id,
-            action_id=action_id,
-            display_name=str(params.get("display_name", "")).strip(),
-            out_root=str(target_root.parent),
-            start=float(params.get("start", 0) or 0),
-            end=float(params["end"]) if params.get("end") not in (None, "") else None,
-            fps=float(params.get("fps", 25) or 25),
-            img_size=int(params.get("img_size", 256) or 256),
-            pads=_motion_pads(params),
-            face_det_batch_size=int(params.get("face_det_batch_size", 8) or 8),
-            fixed_face_box=fixed_face_box,
-            max_frames=int(params.get("max_frames", 0) or 0),
-            tags=str(params.get("tags", "idle,teaching" if kind == "idle" else "speaking,teaching")),
-            best_for=str(params.get("best_for", "")),
-            play_mode=_motion_play_mode(params.get("play_mode"), default_play_mode),
-            can_reverse=_bool_param(params.get("can_reverse"), False),
-            weight=_float_param(params.get("weight"), 1.0, 0.0, 1000.0),
-            min_cycles=_int_param(params.get("min_cycles"), 1, 1, 100),
-            max_cycles=_int_param(params.get("max_cycles"), _int_param(params.get("min_cycles"), 1, 1, 100), 1, 100),
-            switch_at_boundary=_bool_param(params.get("switch_at_boundary"), True),
-            enabled=_bool_param(params.get("enabled"), True),
-            chroma_key=_bool_param(params.get("chroma_key"), False),
-            use_ffmpeg_cut=_bool_param(params.get("use_ffmpeg_cut"), False),
-            ffmpeg_path=_default_ffmpeg_path(params.get("ffmpeg_path", "")),
-            nosmooth=_bool_param(params.get("nosmooth"), False),
-            no_loop=_bool_param(params.get("no_loop"), False),
-            overwrite=_bool_param(params.get("overwrite"), False),
-        )
-
-        from tools.build_speaking_motion_clip import build_clip
-
-        try:
-            await asyncio.to_thread(build_clip, args)
-        except Exception:
-            if target_dir.exists() and not (target_dir / "metadata.json").exists():
-                logger.info("remove incomplete motion clip after failed build: %s", target_dir)
-                shutil.rmtree(target_dir)
-            raise
-        metadata_path = target_dir / "metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["kind"] = kind
-        metadata_path.write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
-            _sync_avatar_motion_clip_config(avatar_id, kind, action_id, metadata)
-        clips = None
-        reload_method = "reload_idle_motions" if kind == "idle" else "reload_speaking_motions"
-        if avatar_session is not None and hasattr(avatar_session, reload_method):
-            clips = getattr(avatar_session, reload_method)()
-
-        return json_ok(data={
-            "sessionid": sessionid,
-            "kind": kind,
-            "metadata": metadata,
-            "clips": clips,
-        })
+        params["_request"] = request
+        return json_ok(data=await _create_motion_clip_data(params))
     except Exception as e:
         logger.exception('motion_create_clip exception:')
         return json_error(str(e))
+
+
+async def _run_motion_clip_task(task_id: str, params: dict) -> None:
+    try:
+        _motion_task_step(task_id, "queued", "任务已开始")
+        result = await _create_motion_clip_data(params, task_id=task_id)
+        _set_motion_task(
+            task_id,
+            status="succeeded",
+            step="done",
+            message="动作素材已生成",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("motion clip task failed: %s", task_id)
+        _set_motion_task(
+            task_id,
+            status="failed",
+            step="failed",
+            message="动作素材生成失败",
+            error=str(exc),
+        )
+
+
+async def motion_create_clip_task(request):
+    """Start a motion clip build task and let the web page poll status."""
+    try:
+        params = await read_json_params(request)
+        task_id = uuid.uuid4().hex
+        sessionid = str(params.get("sessionid", "")).strip() or session_manager.default_alpha_sessionid
+        params["_avatar_session"] = get_session(request, sessionid) if sessionid else None
+        _set_motion_task(
+            task_id,
+            task_id=task_id,
+            status="queued",
+            step="queued",
+            message="任务已创建，等待开始",
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            result=None,
+            error="",
+        )
+        asyncio.create_task(_run_motion_clip_task(task_id, params))
+        return json_ok(data={"task_id": task_id, "task": _get_motion_task(task_id)})
+    except Exception as e:
+        logger.exception('motion_create_clip_task exception:')
+        return json_error(str(e))
+
+
+async def motion_task_status(request):
+    """Return the current status for a motion clip build task."""
+    task_id = str(request.match_info.get("task_id", "")).strip()
+    task = _get_motion_task(task_id)
+    if not task:
+        return json_error("task not found", code=404)
+    return json_ok(data=task)
 
 
 async def alpha_audio_input_ws(request):
@@ -1841,6 +1938,8 @@ def setup_routes(app):
     app.router.add_post("/motion/clips/update", motion_update_clip)
     app.router.add_post("/motion/clips/delete", motion_delete_clip)
     app.router.add_post("/motion/clips/create", motion_create_clip)
+    app.router.add_post("/motion/clips/create-task", motion_create_clip_task)
+    app.router.add_get("/motion/tasks/{task_id}", motion_task_status)
     app.router.add_get("/alpha/ws", alpha_ws)
     app.router.add_get("/alpha/audio", alpha_audio_ws)
     app.router.add_get("/alpha/input/audio", alpha_audio_input_ws)

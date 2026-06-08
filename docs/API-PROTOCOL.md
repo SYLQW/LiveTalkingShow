@@ -620,6 +620,55 @@ Content-Type: application/json
 - 如果请求里带了有效 `sessionid`，生成后会让该 session 重新加载对应素材。
 - 同名素材默认不覆盖，除非传入 `overwrite=true`。
 
+异步生成动作素材：
+
+```http
+POST /motion/clips/create-task
+Content-Type: application/json
+```
+
+请求参数和 `/motion/clips/create` 相同。这个接口不会一直等素材生成完成，而是马上返回任务编号：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "task_id": "d7f0a1...",
+    "task": {
+      "status": "queued",
+      "step": "queued",
+      "message": "任务已创建，等待开始"
+    }
+  }
+}
+```
+
+查询动作素材生成任务：
+
+```http
+GET /motion/tasks/{task_id}
+```
+
+返回示例：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "task_id": "d7f0a1...",
+    "status": "running",
+    "step": "build",
+    "message": "正在截取视频、检测人脸并写入动作素材帧",
+    "result": null,
+    "error": ""
+  }
+}
+```
+
+`status` 常见值有 `queued`、`running`、`succeeded`、`failed`。任务成功后，`result` 里的结构和 `/motion/clips/create` 的返回内容一致。任务状态保存在后端内存里，重启服务后会清空。
+
 选择动作素材：
 
 ```http
