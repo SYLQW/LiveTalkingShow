@@ -5,8 +5,6 @@ import {
   Cable,
   ChevronLeft,
   ChevronRight,
-  Eye,
-  EyeOff,
   ImageUp,
   Maximize2,
   Minimize2,
@@ -109,10 +107,6 @@ function padsFromArray(values) {
     left: Number(source[2]) || 0,
     right: Number(source[3]) || 0
   };
-}
-
-function formatPads(padsValue) {
-  return PAD_KEYS.map((key) => `${PAD_LABELS[key]} ${padsValue[key] ?? 0}`).join('，');
 }
 
 function parseFrame(packet) {
@@ -333,7 +327,6 @@ function App() {
   const [videoPreviewFps, setVideoPreviewFps] = useState(DEFAULTS.videoPreviewFps);
   const [videoRenderIntervalMs, setVideoRenderIntervalMs] = useState(DEFAULTS.videoRenderIntervalMs);
   const [sharpness, setSharpness] = useState(DEFAULTS.sharpness);
-  const [showOverlay, setShowOverlay] = useState(true);
   const [pads, setPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
   const [generationPads, setGenerationPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
   const [pasteDeltaPads, setPasteDeltaPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
@@ -341,8 +334,6 @@ function App() {
   const [selectedMotion, setSelectedMotion] = useState('');
   const [idleClips, setIdleClips] = useState([]);
   const [selectedIdleMotion, setSelectedIdleMotion] = useState('');
-  const [tuningInfo, setTuningInfo] = useState(null);
-  const [canvasBox, setCanvasBox] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [voices, setVoices] = useState([]);
   const [sessionId, setSessionId] = useState('');
   const [status, setStatus] = useState('idle');
@@ -408,48 +399,6 @@ function App() {
     };
   }, [liveTalkingUrl, ttsServerUrl, videoMaxHeight, videoMaxWidth, videoPreviewFps]);
 
-  const updateCanvasBox = useCallback(() => {
-    const canvas = canvasRef.current;
-    const stage = stageRef.current;
-    if (!canvas || !stage) return;
-    const canvasRect = canvas.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
-    setCanvasBox({
-      left: canvasRect.left - stageRect.left,
-      top: canvasRect.top - stageRect.top,
-      width: canvasRect.width,
-      height: canvasRect.height
-    });
-  }, []);
-
-  useEffect(() => {
-    updateCanvasBox();
-    window.addEventListener('resize', updateCanvasBox);
-    return () => window.removeEventListener('resize', updateCanvasBox);
-  }, [updateCanvasBox]);
-
-  const buildOverlayStyle = useCallback((bbox) => {
-    if (!showOverlay || !bbox || !canvasBox.width || !canvasBox.height) return null;
-    const sourceWidth = tuningInfo?.source_width || frameInfo.width || 1;
-    const sourceHeight = tuningInfo?.source_height || frameInfo.height || 1;
-    const scaleX = canvasBox.width / sourceWidth;
-    const scaleY = canvasBox.height / sourceHeight;
-    return {
-      left: `${canvasBox.left + bbox.x1 * scaleX}px`,
-      top: `${canvasBox.top + bbox.y1 * scaleY}px`,
-      width: `${Math.max(1, (bbox.x2 - bbox.x1) * scaleX)}px`,
-      height: `${Math.max(1, (bbox.y2 - bbox.y1) * scaleY)}px`
-    };
-  }, [canvasBox, frameInfo.height, frameInfo.width, showOverlay, tuningInfo]);
-
-  const baseOverlayStyle = useMemo(
-    () => buildOverlayStyle(tuningInfo?.base_bbox),
-    [buildOverlayStyle, tuningInfo]
-  );
-  const paddedOverlayStyle = useMemo(
-    () => buildOverlayStyle(tuningInfo?.padded_bbox),
-    [buildOverlayStyle, tuningInfo]
-  );
   const canvasStyle = useMemo(() => ({
     filter: sharpness > 0
       ? `contrast(${1 + sharpness * 0.006}) saturate(${1 + sharpness * 0.002})`
@@ -482,8 +431,6 @@ function App() {
       ctx.drawImage(bitmap, 0, 0, frame.width, frame.height);
       bitmap.close();
     }
-    window.requestAnimationFrame(updateCanvasBox);
-
     const stats = frameStatsRef.current;
     const now = performance.now();
     const elapsed = now - stats.lastAt;
@@ -495,7 +442,7 @@ function App() {
       stats.fps = fps;
     }
     setFrameInfo({ width: frame.width, height: frame.height, seq: frame.seq, fps });
-  }, [addLog, updateCanvasBox]);
+  }, [addLog]);
 
   const renderLatestFrame = useCallback(() => {
     renderTimerRef.current = 0;
@@ -1013,15 +960,13 @@ function App() {
   const applyTuningPayload = useCallback((payload) => {
     if (!payload?.data) return;
     const data = payload.data;
-    setTuningInfo(data);
     if (data.sessionid) setSessionId(String(data.sessionid));
     if (Array.isArray(data.pads) && data.pads.length >= 4) {
       setPads(padsFromArray(data.pads));
     }
     setGenerationPads(padsFromArray(data.generation_pads || data.baked_pads));
     setPasteDeltaPads(padsFromArray(data.paste_delta_pads));
-    window.requestAnimationFrame(updateCanvasBox);
-  }, [updateCanvasBox]);
+  }, []);
 
   const syncTuning = useCallback(async (targetSessionId = sessionId) => {
     try {
@@ -1263,30 +1208,6 @@ function App() {
     sessionId,
     voiceId
   ]);
-
-  const updatePads = useCallback(async (nextPads) => {
-    setPads(nextPads);
-    try {
-      const resp = await fetch(`${normalized.live}/alpha/tuning`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionid: sessionId || undefined,
-          pads: [nextPads.top, nextPads.bottom, nextPads.left, nextPads.right]
-        })
-      });
-      const payload = await resp.json();
-      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'tuning failed');
-      applyTuningPayload(payload);
-    } catch (error) {
-      addLog('更新 pads 失败', { error: String(error) });
-    }
-  }, [addLog, applyTuningPayload, normalized.live, sessionId]);
-
-  const setPadValue = useCallback((key, value) => {
-    const nextPads = { ...pads, [key]: Number.parseInt(value || '0', 10) };
-    updatePads(nextPads);
-  }, [pads, updatePads]);
 
   const createSession = async () => {
     if (alphaOutput === 'webrtc-packed') {
@@ -1769,11 +1690,11 @@ function App() {
             <textarea value={text} onChange={(event) => setText(event.target.value)} />
           </label>
 
-          <div className="tuningPanel motionPlanPanel">
-            <div className="controlHeader">
+          <details className="tuningPanel motionPlanPanel collapsePanel">
+            <summary>
               <span><SlidersHorizontal size={16} />动作编排</span>
               {motionPlanProvider && <em>{motionPlanProvider === 'llm' ? '大模型' : '规则兜底'}</em>}
-            </div>
+            </summary>
             <div className="buttons">
               <button type="button" onClick={planMotions}>
                 <Send size={16} />编排动作
@@ -1793,7 +1714,7 @@ function App() {
                 </div>
               ))}
             </div>
-          </div>
+          </details>
 
           <div className="buttons">
             <button onClick={checkHealth}><Cable size={16} />检查</button>
@@ -1834,8 +1755,6 @@ function App() {
               </div>
             )}
             <canvas ref={canvasRef} style={canvasStyle} />
-            {baseOverlayStyle && <div className="cropOverlay cropOverlayBase" style={baseOverlayStyle} />}
-            {paddedOverlayStyle && <div className="cropOverlay cropOverlayActive" style={paddedOverlayStyle} />}
           </div>
         </div>
 

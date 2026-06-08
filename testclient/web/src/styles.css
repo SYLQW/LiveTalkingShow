@@ -145,6 +145,35 @@ a.buttonLink:hover {
   background: #f8fafc;
 }
 
+.collapsePanel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.collapsePanel summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsePanel summary::after {
+  content: "展开";
+  font-size: 12px;
+  color: #51606f;
+}
+
+.collapsePanel[open] summary::after {
+  content: "收起";
+}
+
+.collapsePanel summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .controlHeader,
 .controlRow {
   display: flex;
@@ -809,6 +838,23 @@ canvas {
 .clipCards {
   display: grid;
   gap: 8px;
+  max-height: min(430px, 48vh);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.clipCards::-webkit-scrollbar {
+  width: 8px;
+}
+
+.clipCards::-webkit-scrollbar-thumb {
+  background: #cbd5df;
+  border-radius: 999px;
+}
+
+.clipCards::-webkit-scrollbar-track {
+  background: #eef2f6;
+  border-radius: 999px;
 }
 
 .clipCard {
@@ -897,6 +943,7 @@ canvas {
 pre {
   margin: 0;
   flex: 1;
+  max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
   font-size: 12px;

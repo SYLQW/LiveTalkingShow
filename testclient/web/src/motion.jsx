@@ -58,6 +58,28 @@ function defaultPlaybackForKind(kind) {
   };
 }
 
+const MAX_LOG_ITEMS = 8;
+
+function shortText(value, maxLength = 80) {
+  const text = String(value ?? '');
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function summarizeLogData(data) {
+  if (!data) return '';
+  if (typeof data !== 'object') return shortText(data, 160);
+  if (Array.isArray(data)) return `数组 ${data.length} 项`;
+
+  const entries = Object.entries(data);
+  const parts = entries.slice(0, 8).map(([key, value]) => {
+    if (Array.isArray(value)) return `${key}: ${value.length} 项`;
+    if (value && typeof value === 'object') return `${key}: {...}`;
+    return `${key}: ${shortText(value)}`;
+  });
+  if (entries.length > parts.length) parts.push('...');
+  return parts.join('，');
+}
+
 function defaultDraftForKind(kind) {
   if (kind === 'idle') {
     return {
@@ -290,8 +312,9 @@ function App() {
 
   const addLog = useCallback((message, data) => {
     const time = new Date().toLocaleTimeString();
-    const suffix = data ? ` ${JSON.stringify(data)}` : '';
-    setLogs((items) => [`[${time}] ${message}${suffix}`, ...items].slice(0, 80));
+    const summary = summarizeLogData(data);
+    const suffix = summary ? ` ${summary}` : '';
+    setLogs((items) => [`[${time}] ${message}${suffix}`, ...items].slice(0, MAX_LOG_ITEMS));
   }, []);
 
   const setSetting = useCallback((key, value) => {
@@ -373,8 +396,13 @@ function App() {
       const resp = await fetch(`${normalized}/motion/clips${suffix ? `?${suffix}` : ''}`);
       const payload = await resp.json();
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'clips failed');
-      setClips(Array.isArray(payload.data?.clips) ? payload.data.clips : []);
-      addLog('素材库已刷新', payload.data || {});
+      const nextClips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
+      setClips(nextClips);
+      addLog('素材库已刷新', {
+        kind: settings.clipKind,
+        avatar_id: settings.avatarId.trim(),
+        count: nextClips.length
+      });
     } catch (error) {
       addLog('素材库刷新失败', { error: String(error) });
     }
