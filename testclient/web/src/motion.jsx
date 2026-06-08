@@ -80,6 +80,28 @@ function summarizeLogData(data) {
   return parts.join('，');
 }
 
+function clipParamTags(clip) {
+  const sourceInfo = clip.source_info && typeof clip.source_info === 'object' ? clip.source_info : {};
+  const tags = [];
+  if (clip.img_size) tags.push(`img_size ${clip.img_size}`);
+  if (Array.isArray(clip.pads)) tags.push(`pads ${padsToText(clip.pads)}`);
+  if (clip.face_det_batch_size) tags.push(`人脸批量 ${clip.face_det_batch_size}`);
+  if (clip.requested_fps || sourceInfo.requested_fps) tags.push(`生成 ${clip.requested_fps || sourceInfo.requested_fps} fps`);
+  if (typeof clip.chroma_key === 'boolean') tags.push(clip.chroma_key ? '已扣绿' : '未扣绿');
+  if (typeof clip.use_ffmpeg_cut === 'boolean') tags.push(clip.use_ffmpeg_cut ? '先截片段' : '直接取帧');
+  if (sourceInfo.start !== undefined && sourceInfo.end !== undefined && sourceInfo.end !== null) {
+    tags.push(`截取 ${formatTime(sourceInfo.start)}-${formatTime(sourceInfo.end)}`);
+  }
+  return tags;
+}
+
+function formatClipDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return shortText(value, 32);
+  return date.toLocaleString();
+}
+
 function defaultDraftForKind(kind) {
   if (kind === 'idle') {
     return {
@@ -185,6 +207,12 @@ function buildVideoUrl(baseUrl, videoUrl) {
   return `${baseUrl}${videoUrl.startsWith('/') ? '' : '/'}${videoUrl}`;
 }
 
+function buildSourcePreviewUrl(baseUrl, source) {
+  const value = String(source || '').trim();
+  if (!value) return '';
+  return `${baseUrl}/motion/source/video?source=${encodeURIComponent(value)}&t=${Date.now()}`;
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -229,6 +257,7 @@ function App() {
   const [busy, setBusy] = useState('');
   const [status, setStatus] = useState('等待加载视频');
   const [logs, setLogs] = useState([]);
+  const [workHint, setWorkHint] = useState({ title: '', steps: [] });
   const [sourceInfo, setSourceInfo] = useState(null);
   const [videoSrc, setVideoSrc] = useState('');
   const [facePreview, setFacePreview] = useState(null);
@@ -531,6 +560,10 @@ function App() {
     }
     setBusy('probe');
     setStatus('正在加载视频');
+    setWorkHint({
+      title: '正在读取视频信息',
+      steps: ['检查视频路径', '读取分辨率、时长、fps 和帧数', '准备页面预览地址']
+    });
     try {
       const resp = await fetch(`${normalized}/motion/source/probe`, {
         method: 'POST',
@@ -550,6 +583,14 @@ function App() {
       setStartMark(0);
       setEndMark(Math.min(Number(data.duration || 0), 4));
       setStatus('视频已加载');
+      setWorkHint({
+        title: '视频已加载',
+        steps: [
+          `${data.width || 0} x ${data.height || 0}`,
+          `${Number(data.fps || 0).toFixed(2)} fps`,
+          `时长 ${formatTime(data.duration || 0)}`
+        ]
+      });
       addLog('视频已加载', {
         duration: data.duration,
         fps: data.fps,
@@ -560,6 +601,7 @@ function App() {
       setSourceInfo(null);
       setVideoSrc('');
       setStatus('视频加载失败');
+      setWorkHint({ title: '视频加载失败', steps: ['请检查视频路径、允许目录和后端服务'] });
       addLog('视频加载失败', { error: String(error) });
     } finally {
       setBusy('');
@@ -577,6 +619,10 @@ function App() {
 
     setBusy('upload');
     setStatus('正在上传视频');
+    setWorkHint({
+      title: '正在选择视频',
+      steps: ['上传到后端临时目录', '读取视频信息', '生成预览地址']
+    });
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -596,6 +642,7 @@ function App() {
       await loadSource(source);
     } catch (error) {
       setStatus('视频选择失败');
+      setWorkHint({ title: '视频选择失败', steps: ['请检查文件大小、格式和后端服务'] });
       addLog('视频选择失败', { error: String(error) });
     } finally {
       setBusy('');
@@ -610,6 +657,10 @@ function App() {
     }
     setBusy('detect');
     setStatus('正在检测人脸框');
+    setWorkHint({
+      title: '正在检查人脸范围',
+      steps: ['截取片段开始点附近的一帧', '自动检测人脸位置', '把当前 pads 叠加成红色生成框']
+    });
     try {
       const resp = await fetchWithTimeout(`${normalized}/motion/source/detect`, {
         method: 'POST',
@@ -625,6 +676,10 @@ function App() {
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'detect failed');
       setFacePreview(payload.data || null);
       setStatus('人脸框已检测');
+      setWorkHint({
+        title: '人脸框已检测',
+        steps: ['蓝框是自动检测到的人脸', '红框是加上 pads 后真正送去生成的区域', '调 pads 后红框会跟着变化']
+      });
       addLog('人脸框已检测', {
         base: payload.data?.base_box,
         padded: payload.data?.padded_box
@@ -632,6 +687,7 @@ function App() {
     } catch (error) {
       setFacePreview(null);
       setStatus('人脸框检测失败');
+      setWorkHint({ title: '人脸框检测失败', steps: ['可以换到更清晰的开始帧，或者先确认视频里有正脸'] });
       addLog('人脸框检测失败', { error: String(error) });
     } finally {
       setBusy('');
@@ -756,6 +812,16 @@ function App() {
     const busyKey = segment.localId || segment.actionId;
     setBusy(busyKey);
     setStatus(`正在生成 ${segment.actionId}`);
+    setWorkHint({
+      title: `正在生成 ${segment.actionId}`,
+      steps: [
+        settings.useFfmpegCut ? '先用 FFmpeg 截出当前片段' : '直接从源视频取当前时间段',
+        '检测人脸并按 pads 得到生成框',
+        `用 Wav2Lip 生成嘴型，img_size=${settings.imgSize}`,
+        settings.chromaKey ? '把绿色背景扣成透明输出' : '保留原视频背景',
+        '写入素材库并刷新列表'
+      ]
+    });
     try {
       const activeSessionId = sessionId || await ensureSession();
       const resp = await fetch(`${normalized}/motion/clips/create`, {
@@ -793,6 +859,15 @@ function App() {
       const payload = await resp.json();
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'create failed');
       setStatus(`${segment.actionId} 已生成`);
+      setWorkHint({
+        title: `${segment.actionId} 已生成`,
+        steps: [
+          `fps ${settings.fps}`,
+          `img_size ${settings.imgSize}`,
+          `pads ${settings.pads}`,
+          `人脸批量 ${settings.faceBatchSize}`
+        ]
+      });
       updateSegment(segment.localId, 'generated', true);
       addLog('片段已生成到素材库', payload.data?.metadata || {});
       if (Array.isArray(payload.data?.clips)) {
@@ -802,6 +877,10 @@ function App() {
       }
     } catch (error) {
       setStatus(`${segment.actionId} 生成失败`);
+      setWorkHint({
+        title: `${segment.actionId} 生成失败`,
+        steps: ['先看日志里的错误，再检查源视频、片段 id、pads 和后端服务']
+      });
       addLog('生成失败', { action_id: segment.actionId, error: String(error) });
     } finally {
       setBusy('');
@@ -946,6 +1025,14 @@ function App() {
               <button type="button" onClick={checkBackend}>
                 <Cable size={15} />检查后端
               </button>
+            </div>
+            <div className="workHintBox">
+              <strong>{workHint.title || status}</strong>
+              <div>
+                {(workHint.steps.length ? workHint.steps : ['选择视频、标记片段，再生成动作素材。']).map((step) => (
+                  <span key={step}>{step}</span>
+                ))}
+              </div>
             </div>
             <label>
               片段类型
@@ -1104,10 +1191,11 @@ function App() {
               <label>
                 pads
                 <input value={settings.pads} onChange={(event) => setSetting('pads', event.target.value)} />
+                <span className="fieldHint">顺序是上、下、左、右。它不会重新找脸，只是在检测框基础上把生成范围往四边挪动或者扩大。</span>
               </label>
               <div className="facePadTool">
                 <div className="facePadHead">
-                  <span>人脸框预览</span>
+                  <span>人脸范围预览</span>
                   <button type="button" onClick={detectFacePreview} disabled={!settings.source.trim() || busy === 'detect'}>
                     <RefreshCw size={15} />{busy === 'detect' ? '检测中' : '检查人脸框'}
                   </button>
@@ -1121,9 +1209,10 @@ function App() {
                     </div>
                     <div className="facePadControls">
                       <div className="faceLegend">
-                        <span><i className="legendBase" />检测框：{formatBox(facePreview.base_box)}</span>
-                        <span><i className="legendPadded" />生成框：{formatBox(paddedPreviewBox)}</span>
+                        <span><i className="legendBase" />蓝框是自动检测到的人脸：{formatBox(facePreview.base_box)}</span>
+                        <span><i className="legendPadded" />红框是真正送给 Wav2Lip 的区域：{formatBox(paddedPreviewBox)}</span>
                       </div>
+                      <span className="fieldHint">如果红框压到嘴下面，嘴型就容易下移；如果红框太大，嘴部会更糊。一般先让红框围住脸的主要区域，再根据嘴的位置微调。</span>
                       <div className="padsGrid motionPadsGrid">
                         {PAD_FIELDS.map(({ key, label }) => (
                           <label key={key}>
@@ -1219,8 +1308,22 @@ function App() {
             </div>
             <div className="clipCards">
               {clips.length === 0 && <span className="clipEmpty">暂无动作片段</span>}
-              {clips.map((clip) => (
+              {clips.map((clip) => {
+                const paramTags = clipParamTags(clip);
+                const clipDate = formatClipDate(clip.created_at || clip.updated_at);
+                const previewUrl = buildSourcePreviewUrl(normalized, clip.cut_video);
+                return (
                 <div className="clipCard" key={clip.action_id}>
+                  {previewUrl && (
+                    <video
+                      className="clipPreviewVideo"
+                      src={previewUrl}
+                      muted
+                      loop
+                      controls
+                      preload="metadata"
+                    />
+                  )}
                   <div className="clipCardHead">
                     <div>
                       <strong>{clip.display_name || clip.action_id}</strong>
@@ -1240,8 +1343,17 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <span>{clip.frame_count || 0} 帧 / {clip.fps || '-'} fps</span>
+                  <div className="clipMetaLine">
+                    <span>{clip.frame_count || 0} 帧</span>
+                    <span>{clip.fps || '-'} fps</span>
+                    {clipDate && <span>{clipDate}</span>}
+                  </div>
                   <span className="clipMetaRow">{clipPlaybackText(clip)}</span>
+                  {paramTags.length > 0 && (
+                    <div className="clipParamTags">
+                      {paramTags.map((item) => <span key={item}>{item}</span>)}
+                    </div>
+                  )}
                   {clip.description && <span>{clip.description}</span>}
                   {clip.best_for && <span>适合：{clip.best_for}</span>}
                   {Array.isArray(clip.tags) && clip.tags.length > 0 && <span>标签：{clip.tags.join(', ')}</span>}
@@ -1333,7 +1445,8 @@ function App() {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           </section>
 
