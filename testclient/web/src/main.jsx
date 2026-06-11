@@ -8,6 +8,8 @@ import {
   Eye,
   EyeOff,
   ImageUp,
+  Maximize2,
+  Minimize2,
   Mic,
   Play,
   Presentation,
@@ -355,7 +357,9 @@ function App() {
   const [classroomMode, setClassroomMode] = useState(false);
   const [slideItems, setSlideItems] = useState([]);
   const [slideIndex, setSlideIndex] = useState(0);
-  const [avatarSize, setAvatarSize] = useState(24);
+  const [avatarPosition, setAvatarPosition] = useState(22);
+  const [avatarScale, setAvatarScale] = useState(100);
+  const [classroomFullscreen, setClassroomFullscreen] = useState(false);
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
   const slideInputRef = useRef(null);
@@ -988,6 +992,24 @@ function App() {
     }
   };
 
+  const refreshVoices = useCallback(async () => {
+    try {
+      const resp = await fetch(`${normalized.tts}/tts/voices`);
+      const payload = await resp.json();
+      const nextVoices = Array.isArray(payload.voices) ? payload.voices : [];
+      setVoices(nextVoices);
+      if (nextVoices.length > 0 && !nextVoices.some((voice) => Number(voice.id) === Number(voiceId))) {
+        setVoiceId(Number(nextVoices[0].id));
+      }
+    } catch (error) {
+      addLog('加载音色失败', { error: String(error) });
+    }
+  }, [addLog, normalized.tts, voiceId]);
+
+  useEffect(() => {
+    refreshVoices();
+  }, [refreshVoices]);
+
   const applyTuningPayload = useCallback((payload) => {
     if (!payload?.data) return;
     const data = payload.data;
@@ -1408,6 +1430,21 @@ function App() {
     setSlideIndex((index) => Math.min(slideItems.length - 1, index + 1));
   }, [slideItems.length]);
 
+  const toggleClassroomFullscreen = useCallback(async () => {
+    const target = stageRef.current;
+    if (!target) return;
+    try {
+      if (document.fullscreenElement === target) {
+        await document.exitFullscreen();
+      } else {
+        setClassroomMode(true);
+        await target.requestFullscreen();
+      }
+    } catch (error) {
+      addLog('切换课堂全屏失败', { error: String(error) });
+    }
+  }, [addLog]);
+
   useEffect(() => {
     const handleKeyDown = (event) => {
       if (!classroomMode) return;
@@ -1418,6 +1455,14 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [classroomMode, nextSlide, prevSlide]);
 
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setClassroomFullscreen(document.fullscreenElement === stageRef.current);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
   return (
     <main className="app">
       <section className={`workspace ${classroomMode ? 'workspaceClassroom' : ''}`}>
@@ -1427,88 +1472,92 @@ function App() {
             <span>RobotTTS 流式测试</span>
           </div>
 
-          <label>
-            LiveTalking
-            <input value={liveTalkingUrl} onChange={(event) => setLiveTalkingUrl(event.target.value)} />
-          </label>
-          <label>
-            TTS Server
-            <input value={ttsServerUrl} onChange={(event) => setTtsServerUrl(event.target.value)} />
-          </label>
-          <label>
-            Alpha Audio Input
-            <input value={alphaInputWs} onChange={(event) => setAlphaInputWs(event.target.value)} />
-          </label>
-
-          <label>
-            Alpha Output
-            <select value={alphaOutput} onChange={(event) => setAlphaOutput(normalizeAlphaOutput(event.target.value))}>
-              <option value="webrtc-packed">webrtc-packed</option>
-              <option value="ws">ws</option>
-            </select>
-          </label>
-
-          <div className="grid2">
+          <details className="tuningPanel collapsePanel">
+            <summary>
+              <span><SlidersHorizontal size={16} />高级设置</span>
+            </summary>
             <label>
-              Voice
-              <select value={voiceId} onChange={(event) => setVoiceId(Number.parseInt(event.target.value, 10))}>
-                {voices.length === 0 && <option value={voiceId}>voice {voiceId}</option>}
-                {voices.map((voice) => (
-                  <option value={voice.id} key={voice.id}>{voice.id} {voice.name}</option>
-                ))}
-              </select>
+              LiveTalking
+              <input value={liveTalkingUrl} onChange={(event) => setLiveTalkingUrl(event.target.value)} />
             </label>
             <label>
-              Mode
-              <select value={mode} onChange={(event) => setMode(event.target.value)}>
-                <option value="instruct2">instruct2</option>
-                <option value="zero-shot">zero-shot</option>
-              </select>
+              TTS Server
+              <input value={ttsServerUrl} onChange={(event) => setTtsServerUrl(event.target.value)} />
             </label>
-          </div>
-
-          <div className="grid2">
             <label>
-              Max Width
+              Alpha Audio Input
+              <input value={alphaInputWs} onChange={(event) => setAlphaInputWs(event.target.value)} />
+            </label>
+
+            <div className="grid2">
+              <label>
+                Alpha Output
+                <select value={alphaOutput} onChange={(event) => setAlphaOutput(normalizeAlphaOutput(event.target.value))}>
+                  <option value="webrtc-packed">webrtc-packed</option>
+                  <option value="ws">ws</option>
+                </select>
+              </label>
+              <label>
+                Voice
+                <select value={voiceId} onChange={(event) => setVoiceId(Number.parseInt(event.target.value, 10))}>
+                  {voices.length === 0 && <option value={voiceId}>voice {voiceId}</option>}
+                  {voices.map((voice) => (
+                    <option value={voice.id} key={voice.id}>{voice.id} {voice.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Mode
+                <select value={mode} onChange={(event) => setMode(event.target.value)}>
+                  <option value="instruct2">instruct2</option>
+                  <option value="zero-shot">zero-shot</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="grid2">
+              <label>
+                Max Width
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={videoMaxWidth}
+                  onChange={(event) => setVideoMaxWidth(Number.parseInt(event.target.value || '0', 10))}
+                />
+              </label>
+              <label>
+                Max Height
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={videoMaxHeight}
+                  onChange={(event) => setVideoMaxHeight(Number.parseInt(event.target.value || '0', 10))}
+                />
+              </label>
+              <label>
+                Video FPS
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={videoPreviewFps}
+                  onChange={(event) => setVideoPreviewFps(Number.parseFloat(event.target.value || '0'))}
+                />
+              </label>
+            </div>
+            <label>
+              Render Interval
               <input
                 type="number"
-                min="0"
+                min="16"
                 step="1"
-                value={videoMaxWidth}
-                onChange={(event) => setVideoMaxWidth(Number.parseInt(event.target.value || '0', 10))}
+                value={videoRenderIntervalMs}
+                onChange={(event) => setVideoRenderIntervalMs(Math.max(16, Number.parseInt(event.target.value || '40', 10)))}
               />
             </label>
-            <label>
-              Max Height
-              <input
-                type="number"
-                min="0"
-                step="1"
-                value={videoMaxHeight}
-                onChange={(event) => setVideoMaxHeight(Number.parseInt(event.target.value || '0', 10))}
-              />
-            </label>
-            <label>
-              Video FPS
-              <input
-                type="number"
-                min="0"
-                step="1"
-                value={videoPreviewFps}
-                onChange={(event) => setVideoPreviewFps(Number.parseFloat(event.target.value || '0'))}
-              />
-            </label>
-          </div>
-          <label>
-            Render Interval
-            <input
-              type="number"
-              min="16"
-              step="1"
-              value={videoRenderIntervalMs}
-              onChange={(event) => setVideoRenderIntervalMs(Math.max(16, Number.parseInt(event.target.value || '40', 10)))}
-            />
-          </label>
+          </details>
 
           <div className="tuningPanel">
             <div className="controlHeader">
@@ -1683,16 +1732,32 @@ function App() {
               </button>
             </div>
             <label>
-              数字人大小 {avatarSize}%
+              数字人位置 {avatarPosition}%
               <input
                 type="range"
-                min="14"
-                max="42"
+                min="-18"
+                max="44"
                 step="1"
-                value={avatarSize}
-                onChange={(event) => setAvatarSize(Number.parseInt(event.target.value || '24', 10))}
+                value={avatarPosition}
+                onChange={(event) => setAvatarPosition(Number.parseInt(event.target.value || '22', 10))}
               />
             </label>
+            <label>
+              数字人缩放 {avatarScale}%
+              <input
+                type="range"
+                min="60"
+                max="180"
+                step="5"
+                value={avatarScale}
+                onChange={(event) => setAvatarScale(Number.parseInt(event.target.value || '100', 10))}
+              />
+            </label>
+            <span className="fieldHint">位置会以右下角为基准调整，数值越小越靠右，可以拖到负数让数字人伸出展示区；缩放只改变数字人大小。</span>
+            <button type="button" onClick={toggleClassroomFullscreen}>
+              {classroomFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+              {classroomFullscreen ? '退出全屏' : '全屏播放'}
+            </button>
           </div>
 
           <label>
@@ -1751,7 +1816,10 @@ function App() {
           <div
             className={`canvasWrap ${DEFAULTS.videoFit === 'native' ? 'canvasWrapNative' : ''} ${classroomMode ? 'classroomStage' : ''}`}
             ref={stageRef}
-            style={classroomMode ? { '--avatar-size': `${avatarSize}%` } : undefined}
+            style={classroomMode ? {
+              '--avatar-position': `${avatarPosition}%`,
+              '--avatar-scale': avatarScale / 100
+            } : undefined}
           >
             {classroomMode && (
               <div className="slideStage">
