@@ -69,6 +69,14 @@ data/avatars/wav2lip_avatar_female_model/
 | `./scripts/download-models.sh musetalk` | 下载 MuseTalk、VAE、Whisper、DWPose、FaceParsing 模型。 |
 | `./scripts/download-models.sh all` | 下载上述全部资产。 |
 
+清晰度增强这块现在默认会去找仓库内的相对路径：
+
+```text
+tools/RealESRGAN/realesrgan-ncnn-vulkan.exe
+```
+
+这个目录里会放 `realesr-animevideov3`、`realesrgan-x4plus-anime` 这类小模型文件，别人拉到仓库以后不用再手动改盘符。要是本机想换地方，也可以再用 `REALESRGAN_PATH` 覆盖。
+
 所有 `data/avatars/*`、`models/*`、`.env`、日志和依赖目录都不提交到 Git。
 
 ### 2.2 启动测试 TTS

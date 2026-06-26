@@ -53,6 +53,8 @@ hub/
 checkpoints/
 weights/
 pretrained_models/
+!tools/RealESRGAN/
+!tools/RealESRGAN/**
 
 # Downloaded models and generated avatar assets
 data/*

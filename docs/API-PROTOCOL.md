@@ -883,7 +883,7 @@ Content-Type: application/json
 | 变量 | 说明 |
 | --- | --- |
 | `RENDER_OUTPUT_DIR` | 生成视频输出目录，默认 `tmp/render_outputs`。 |
-| `REALESRGAN_PATH` | `realesrgan-ncnn-vulkan` 可执行文件路径；如果已加入 PATH，可以不填。 |
+| `REALESRGAN_PATH` | `realesrgan-ncnn-vulkan` 可执行文件路径；如果仓库内已有 `tools/RealESRGAN/realesrgan-ncnn-vulkan.exe`，就可以不填。 |
 | `WAV2LIP_ONNX_HQ_ROOT` | ONNX Wav2Lip 实验仓库目录，选择 `onnx_base` 时需要。 |
 | `WAV2LIP_ONNX_PYTHON` | ONNX Wav2Lip 使用的 Python；不填时会先找 ONNX 实验目录上级的 `.venv`。 |
 | `RENDER_TTS_TIMEOUT` | 生成音频请求超时时间，默认 120 秒。 |
