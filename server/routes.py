@@ -9,7 +9,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,6 +66,14 @@ AVATAR_MOTION_CONFIG = "motion.json"
 MOTION_TASKS: dict[str, dict] = {}
 MOTION_TASK_LOCK = threading.Lock()
 MOTION_TASK_MAX_ITEMS = 100
+RENDER_LIP_BACKENDS = {"wav2lip256", "onnx_base"}
+RENDER_ENHANCE_MODES = {"none", "realesr-animevideov3", "realesrgan-x4plus-anime", "clear_reality_x4"}
+RENDER_REALTIME_CONFIG = {
+    "enabled": False,
+    "lip_backend": "wav2lip256",
+    "enhance_mode": "none",
+    "updated_at": "",
+}
 
 
 @dataclass
@@ -739,6 +749,362 @@ def _get_motion_task(task_id: str) -> dict | None:
 
 def _motion_task_step(task_id: str, step: str, message: str) -> None:
     _set_motion_task(task_id, status="running", step=step, message=message)
+
+
+def _render_lip_backend(value: str) -> str:
+    backend = str(value or "wav2lip256").strip().lower()
+    if backend not in RENDER_LIP_BACKENDS:
+        raise ValueError(f"lip_backend must be one of: {', '.join(sorted(RENDER_LIP_BACKENDS))}")
+    return backend
+
+
+def _render_enhance_mode(value: str) -> str:
+    mode = str(value or "none").strip().lower()
+    if mode in {"animevideov3", "anime-v3", "realesr_animevideov3"}:
+        mode = "realesr-animevideov3"
+    if mode in {"x4plus-anime", "realesrgan_x4plus_anime"}:
+        mode = "realesrgan-x4plus-anime"
+    if mode in {"clear-reality-x4", "clear_reality"}:
+        mode = "clear_reality_x4"
+    if mode not in RENDER_ENHANCE_MODES:
+        raise ValueError(f"enhance_mode must be one of: {', '.join(sorted(RENDER_ENHANCE_MODES))}")
+    return mode
+
+
+def _ensure_render_combo(lip_backend: str, enhance_mode: str) -> None:
+    if lip_backend == "wav2lip256" and enhance_mode == "clear_reality_x4":
+        raise ValueError("clear_reality_x4 只用于 ONNX base 实验后端")
+    if lip_backend != "wav2lip256" and enhance_mode in {"realesr-animevideov3", "realesrgan-x4plus-anime"}:
+        raise ValueError("ONNX base 暂时只支持 none 或 clear_reality_x4 增强")
+
+
+def _default_realesrgan_path(configured: str = "") -> str:
+    return _find_executable("realesrgan-ncnn-vulkan", configured or os.getenv("REALESRGAN_PATH", ""))
+
+
+def _render_output_root() -> Path:
+    root = Path(os.getenv("RENDER_OUTPUT_DIR") or "tmp/render_outputs")
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _render_task_output(task_id: str, suffix: str = ".mp4") -> Path:
+    task_dir = _render_output_root() / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    return task_dir / f"render{suffix}"
+
+
+def _render_clip_dir(avatar_id: str, action_id: str, kind: str = "speaking") -> Path:
+    clip_root = _motion_clip_root(avatar_id, kind)
+    clip_dir = (clip_root / action_id).resolve()
+    root = clip_root.resolve()
+    if root not in clip_dir.parents or not clip_dir.is_dir():
+        raise FileNotFoundError(f"motion clip not found: {action_id}")
+    return clip_dir
+
+
+def _render_clip_video_source(clip_dir: Path) -> Path:
+    metadata_path = clip_dir / "metadata.json"
+    metadata = {}
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig") or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+    for key in ("cut_video", "source_clip"):
+        value = str(metadata.get(key, "")).strip()
+        if value:
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
+            if candidate.is_file():
+                return candidate.resolve()
+    candidate = clip_dir / "source_clip.mp4"
+    if candidate.is_file():
+        return candidate.resolve()
+    raise FileNotFoundError(f"source_clip.mp4 not found in motion clip: {clip_dir}")
+
+
+def _render_task_output_url(task_id: str) -> str:
+    return f"/render/output/{task_id}"
+
+
+def _render_library_items(limit: int = 100) -> list[dict]:
+    root = _render_output_root()
+    items = []
+    for output_path in root.glob("*/render.mp4"):
+        if not output_path.is_file():
+            continue
+        task_id = output_path.parent.name
+        try:
+            stat = output_path.stat()
+        except OSError:
+            continue
+        task = _get_motion_task(task_id) or {}
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        items.append(
+            {
+                "task_id": task_id,
+                "name": task_id,
+                "output": str(output_path.resolve()),
+                "output_url": _render_task_output_url(task_id),
+                "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(timespec="seconds"),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                "size_bytes": stat.st_size,
+                "lip_backend": result.get("lip_backend") or task.get("lip_backend") or "",
+                "enhance_mode": result.get("enhance_mode") or task.get("enhance_mode") or "",
+                "avatar_id": result.get("avatar_id") or "",
+                "action_id": result.get("action_id") or "",
+                "elapsed_seconds": result.get("elapsed_seconds") or None,
+            }
+        )
+    items.sort(key=lambda item: item["updated_at"], reverse=True)
+    return items[:max(1, limit)]
+
+
+def _render_task_output_path(task_id: str) -> Path:
+    root = _render_output_root()
+    task = _get_motion_task(task_id)
+    result = task.get("result") if isinstance(task, dict) and isinstance(task.get("result"), dict) else {}
+    output = str(result.get("output", "")).strip()
+    output_path = Path(output).resolve() if output else (root / task_id / "render.mp4").resolve()
+    if not _path_is_relative_to(output_path, root):
+        raise PermissionError("render output path is not allowed")
+    if not output_path.is_file():
+        raise FileNotFoundError(f"render output not found: {output_path}")
+    return output_path
+
+
+def _run_subprocess_logged(command: list[str], cwd: Path | None = None, env: dict | None = None) -> None:
+    logger.info("run render command: %s", " ".join(str(item) for item in command))
+    result = subprocess.run(
+        command,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-30:])
+        raise RuntimeError(tail or f"command failed with code {result.returncode}")
+
+
+def _tts_server_url(params: dict) -> str:
+    value = str(params.get("tts_server_url") or os.getenv("ROBOT_TTS_URL") or "http://127.0.0.1:8036").strip()
+    return value.rstrip("/")
+
+
+def _synthesize_render_audio(params: dict, output_path: Path) -> Path:
+    audio_path = str(params.get("audio_path", "")).strip()
+    if audio_path:
+        path = Path(audio_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        path = path.resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"audio_path not found: {path}")
+        return path
+
+    text = str(params.get("text", "")).strip()
+    if not text:
+        raise ValueError("text or audio_path is required")
+    request_body = {
+        "text": text,
+        "voice_id": int(params.get("voice_id", 0) or 0),
+        "prompts": str(params.get("prompts", "请自然清晰地朗读。")),
+        "mode": str(params.get("mode", "instruct2")),
+        "output_path": str(output_path),
+    }
+    raw = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+    request = Request(
+        f"{_tts_server_url(params)}/tts",
+        data=raw,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=float(os.getenv("RENDER_TTS_TIMEOUT", "120") or 120)) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if payload.get("success") is not True:
+        raise RuntimeError(payload.get("message") or payload.get("error") or "TTS failed")
+    path = Path(payload.get("audio_path") or output_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"TTS audio not found: {path}")
+    return path
+
+
+def _render_wav2lip256_command(params: dict, clip_dir: Path, audio_path: Path, output_path: Path, enhance_mode: str) -> list[str]:
+    python_path = str(params.get("python_path") or sys.executable)
+    checkpoint = str(params.get("checkpoint") or os.getenv("WAV2LIP_CHECKPOINT") or Path.cwd() / "models" / "wav2lip.pth")
+    ffmpeg = _default_ffmpeg_path(params.get("ffmpeg_path", ""))
+    fps = float(params.get("fps", 30) or 30)
+    batch_size = int(params.get("batch_size") or os.getenv("LIVETALKING_BATCH_SIZE") or 1)
+    max_frames = int(params.get("max_frames", 0) or 0)
+    command = [
+        python_path,
+        str(Path.cwd() / "tools" / "render_wav2lip_motion_sample.py"),
+        "--clip-dir",
+        str(clip_dir),
+        "--audio",
+        str(audio_path),
+        "--checkpoint",
+        checkpoint,
+        "--output",
+        str(output_path),
+        "--fps",
+        str(fps),
+        "--batch-size",
+        str(batch_size),
+        "--max-frames",
+        str(max_frames),
+        "--ffmpeg",
+        ffmpeg,
+        "--crf",
+        str(params.get("crf", "16")),
+        "--preset",
+        str(params.get("preset", "medium")),
+    ]
+    if enhance_mode != "none":
+        model = "realesr-animevideov3"
+        scale = "2"
+        if enhance_mode == "realesrgan-x4plus-anime":
+            model = "realesrgan-x4plus-anime"
+            scale = "4"
+        command.extend([
+            "--enhance-roi",
+            "lower-face",
+            "--realesrgan",
+            _default_realesrgan_path(params.get("realesrgan_path", "")),
+            "--realesrgan-model",
+            model,
+            "--realesrgan-scale",
+            str(params.get("realesrgan_scale") or scale),
+            "--realesrgan-tile",
+            str(params.get("realesrgan_tile", "0")),
+            "--realesrgan-jobs",
+            str(params.get("realesrgan_jobs", "2:2:2")),
+            "--enhance-format",
+            str(params.get("enhance_format", "png")),
+            "--enhance-roi-y-start-ratio",
+            str(params.get("enhance_roi_y_start_ratio", "0.58")),
+            "--enhance-roi-expand",
+            str(params.get("enhance_roi_expand", "0 4 19 23")),
+            "--enhance-roi-feather",
+            str(params.get("enhance_roi_feather", "18")),
+            "--enhance-io-workers",
+            str(params.get("enhance_io_workers", "4")),
+        ])
+        model_dir = str(params.get("realesrgan_model_dir", "")).strip()
+        if model_dir:
+            command.extend(["--realesrgan-model-dir", model_dir])
+    else:
+        command.extend(["--enhance-roi", "none"])
+    return command
+
+
+def _render_onnx_base_command(params: dict, clip_dir: Path, audio_path: Path, output_path: Path, enhance_mode: str) -> tuple[list[str], Path]:
+    raw_onnx_root = str(params.get("onnx_root") or os.getenv("WAV2LIP_ONNX_HQ_ROOT") or "").strip()
+    if not raw_onnx_root:
+        raise ValueError("WAV2LIP_ONNX_HQ_ROOT is required when lip_backend=onnx_base")
+    onnx_root = Path(raw_onnx_root).resolve()
+    script = onnx_root / "inference_onnxModel.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"ONNX Wav2Lip script not found: {script}")
+    checkpoint = Path(str(params.get("onnx_checkpoint") or onnx_root / "checkpoints" / "wav2lip.onnx")).resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"ONNX checkpoint not found: {checkpoint}")
+    default_onnx_python = onnx_root.parent / ".venv" / "Scripts" / "python.exe"
+    python_path = str(
+        params.get("onnx_python_path")
+        or os.getenv("WAV2LIP_ONNX_PYTHON")
+        or (default_onnx_python if default_onnx_python.exists() else sys.executable)
+    )
+    command = [
+        python_path,
+        str(script),
+        "--checkpoint_path",
+        str(checkpoint),
+        "--face",
+        str(_render_clip_video_source(clip_dir)),
+        "--audio",
+        str(audio_path),
+        "--outfile",
+        str(output_path),
+        "--auto_roi",
+        "--fps",
+        str(float(params.get("fps", 30) or 30)),
+        "--face_mode",
+        str(int(params.get("onnx_face_mode", 0) or 0)),
+        "--pads",
+        str(int(params.get("onnx_pads", 4) or 4)),
+        "--pingpong",
+    ]
+    max_frames = int(params.get("max_frames", 0) or 0)
+    if max_frames > 0:
+        command.extend(["--cut_out", str(max_frames)])
+    if _bool_param(params.get("onnx_face_mask"), enhance_mode != "none"):
+        command.append("--face_mask")
+    if _bool_param(params.get("onnx_ellipse_mask"), False):
+        command.append("--ellipse_mask")
+    if enhance_mode == "clear_reality_x4":
+        command.append("--frame_enhancer")
+    return command, onnx_root
+
+
+def _build_render_video_data(task_id: str, params: dict) -> dict:
+    started = time.perf_counter()
+    sessionid = str(params.get("sessionid", "")).strip() or session_manager.default_alpha_sessionid
+    avatar_session = params.get("_avatar_session")
+    avatar_id = str(params.get("avatar_id", "")).strip()
+    if not avatar_id and avatar_session is not None:
+        avatar_id = str(getattr(avatar_session.opt, "avatar_id", "")).strip()
+    if not avatar_id:
+        avatar_id = str(os.getenv("AVATAR_ID", "")).strip()
+    avatar_id = _clean_motion_id(avatar_id, "avatar_id")
+
+    action_id = str(params.get("action_id", "")).strip()
+    if action_id in {"", "auto"}:
+        clips = _list_motion_clip_metadata(avatar_id, _motion_root_for_kind("speaking"), "speaking")
+        action_id = _fallback_motion_action(clips)
+    action_id = _clean_motion_id(action_id, "action_id")
+    clip_dir = _render_clip_dir(avatar_id, action_id, "speaking")
+    lip_backend = _render_lip_backend(params.get("lip_backend", "wav2lip256"))
+    enhance_mode = _render_enhance_mode(params.get("enhance_mode", "none"))
+    _ensure_render_combo(lip_backend, enhance_mode)
+
+    task_dir = _render_output_root() / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = task_dir / "tts.wav"
+    _motion_task_step(task_id, "tts", "正在生成音频")
+    audio_path = _synthesize_render_audio(params, audio_path)
+
+    output_path = _render_task_output(task_id)
+    _motion_task_step(task_id, "render", "正在生成口型视频")
+    if lip_backend == "onnx_base":
+        command, cwd = _render_onnx_base_command(params, clip_dir, audio_path, output_path, enhance_mode)
+    else:
+        command = _render_wav2lip256_command(params, clip_dir, audio_path, output_path, enhance_mode)
+        cwd = Path.cwd()
+    _run_subprocess_logged(command, cwd=cwd)
+
+    elapsed = round(time.perf_counter() - started, 2)
+    return {
+        "task_id": task_id,
+        "sessionid": sessionid,
+        "avatar_id": avatar_id,
+        "action_id": action_id,
+        "clip_dir": str(clip_dir),
+        "audio": str(audio_path),
+        "output": str(output_path),
+        "output_url": _render_task_output_url(task_id),
+        "lip_backend": lip_backend,
+        "enhance_mode": enhance_mode,
+        "elapsed_seconds": elapsed,
+    }
 
 
 def _split_motion_text(text: str, max_segments: int = 8) -> list[str]:
@@ -1732,7 +2098,6 @@ async def motion_create_clip_task(request):
         params["_avatar_session"] = get_session(request, sessionid) if sessionid else None
         _set_motion_task(
             task_id,
-            task_id=task_id,
             status="queued",
             step="queued",
             message="任务已创建，等待开始",
@@ -1754,6 +2119,100 @@ async def motion_task_status(request):
     if not task:
         return json_error("task not found", code=404)
     return json_ok(data=task)
+
+
+async def _run_render_video_task(task_id: str, params: dict) -> None:
+    try:
+        _motion_task_step(task_id, "queued", "视频生成任务已开始")
+        result = await asyncio.to_thread(_build_render_video_data, task_id, params)
+        _set_motion_task(
+            task_id,
+            status="succeeded",
+            step="done",
+            message="视频已生成",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("render video task failed: %s", task_id)
+        _set_motion_task(
+            task_id,
+            status="failed",
+            step="failed",
+            message="视频生成失败",
+            error=str(exc),
+        )
+
+
+async def render_video_task(request):
+    """Start an offline render task for comparing lip-sync and enhancement settings."""
+    try:
+        params = await read_json_params(request)
+        task_id = uuid.uuid4().hex
+        sessionid = str(params.get("sessionid", "")).strip() or session_manager.default_alpha_sessionid
+        params["_avatar_session"] = get_session(request, sessionid) if sessionid else None
+        _set_motion_task(
+            task_id,
+            task_type="render_video",
+            status="queued",
+            step="queued",
+            message="任务已创建，等待开始",
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            result=None,
+            error="",
+        )
+        asyncio.create_task(_run_render_video_task(task_id, params))
+        return json_ok(data={"task_id": task_id, "task": _get_motion_task(task_id)})
+    except Exception as e:
+        logger.exception('render_video_task exception:')
+        return json_error(str(e))
+
+
+async def render_task_status(request):
+    """Return the current status for an offline render task."""
+    return await motion_task_status(request)
+
+
+async def render_output(request):
+    """Serve an output video produced by a render task."""
+    try:
+        task_id = str(request.match_info.get("task_id", "")).strip()
+        output_path = _render_task_output_path(task_id)
+        headers = {"Cache-Control": "no-store"}
+        return web.FileResponse(path=output_path, headers=headers)
+    except Exception as e:
+        logger.exception('render_output exception:')
+        return json_error(str(e))
+
+
+async def render_library(request):
+    """List generated render videos from the local render output directory."""
+    try:
+        limit = int(request.query.get("limit", "100") or 100)
+        return json_ok(data={"items": _render_library_items(limit=limit)})
+    except Exception as e:
+        logger.exception('render_library exception:')
+        return json_error(str(e))
+
+
+async def render_realtime_config(request):
+    """Read or update the experimental realtime enhancement config."""
+    try:
+        if request.method == "POST":
+            params = await read_json_params(request)
+            if "enabled" in params:
+                RENDER_REALTIME_CONFIG["enabled"] = _bool_param(params.get("enabled"), False)
+            if "lip_backend" in params:
+                RENDER_REALTIME_CONFIG["lip_backend"] = _render_lip_backend(params.get("lip_backend"))
+            if "enhance_mode" in params:
+                RENDER_REALTIME_CONFIG["enhance_mode"] = _render_enhance_mode(params.get("enhance_mode"))
+            _ensure_render_combo(RENDER_REALTIME_CONFIG["lip_backend"], RENDER_REALTIME_CONFIG["enhance_mode"])
+            RENDER_REALTIME_CONFIG["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        data = dict(RENDER_REALTIME_CONFIG)
+        data["note"] = "当前只是实验配置，默认不会把 RealESRGAN 接进实时帧处理。"
+        return json_ok(data=data)
+    except Exception as e:
+        logger.exception('render_realtime_config exception:')
+        return json_error(str(e))
 
 
 async def alpha_audio_input_ws(request):
@@ -1940,6 +2399,12 @@ def setup_routes(app):
     app.router.add_post("/motion/clips/create", motion_create_clip)
     app.router.add_post("/motion/clips/create-task", motion_create_clip_task)
     app.router.add_get("/motion/tasks/{task_id}", motion_task_status)
+    app.router.add_post("/render/video-task", render_video_task)
+    app.router.add_get("/render/tasks/{task_id}", render_task_status)
+    app.router.add_get("/render/library", render_library)
+    app.router.add_get("/render/output/{task_id}", render_output)
+    app.router.add_get("/render/realtime", render_realtime_config)
+    app.router.add_post("/render/realtime", render_realtime_config)
     app.router.add_get("/alpha/ws", alpha_ws)
     app.router.add_get("/alpha/audio", alpha_audio_ws)
     app.router.add_get("/alpha/input/audio", alpha_audio_input_ws)

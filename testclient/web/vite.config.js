@@ -22,7 +22,8 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         input: {
           main: resolve(__dirname, 'index.html'),
-          motion: resolve(__dirname, 'motion.html')
+          motion: resolve(__dirname, 'motion.html'),
+          renderLibrary: resolve(__dirname, 'render-library.html')
         }
       }
     },

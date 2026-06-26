@@ -58,6 +58,11 @@ LiveTalking JSON 响应：
 | `POST` | `/motion/clips/create` | JSON | 从源视频或图片目录生成动作素材。 |
 | `POST` | `/motion/clips/update` | JSON | 修改动作素材元信息。 |
 | `POST` | `/motion/clips/delete` | JSON | 删除动作素材。 |
+| `POST` | `/render/video-task` | JSON | 使用动作素材生成可预览的讲课视频，可选画质增强。 |
+| `GET` | `/render/tasks/{task_id}` | JSON | 查询生成视频任务。 |
+| `GET` | `/render/output/{task_id}` | file | 预览或下载生成后的视频。 |
+| `GET` | `/render/realtime` | JSON | 查看实时增强实验配置。 |
+| `POST` | `/render/realtime` | JSON | 保存实时增强实验配置，默认不会改变实时帧处理。 |
 | `GET` | `/api/admin/config` | JSON | 查看启动配置（返回 `vars(opt)` 全量配置字典）。 |
 | `GET` | `/api/admin/sessions` | JSON | 查看活跃 session（返回 `sessionid`、`speaking`、`recording`、`model`、`avatar_id`、`REF_FILE`、`transport`、`batch_size`、`customopt` 等字段）。 |
 | `POST` | `/api/avatar/task` | JSON/multipart | 创建 avatar 制作任务。 |
@@ -756,6 +761,132 @@ Content-Type: application/json
 ```
 
 如果配置了 `MOTION_LLM_API_KEY`、`MOTION_LLM_BASE_URL` 和 `MOTION_LLM_MODEL`，服务会调用大模型生成动作计划。如果没有配置，会使用规则兜底。
+
+## 7.1 离线视频生成和增强
+
+这组接口用于把已经做好的动作素材、TTS 音频和 Wav2Lip 口型生成流程合成一个 mp4。它不替代 `/alpha/speak`，主要用于对比“原版输出”和“增强后输出”。RealESRGAN 这类增强现在先按离线任务跑，实时增强只保留实验配置。
+
+启动任务：
+
+```http
+POST /render/video-task
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionid": "123456",
+  "avatar_id": "teacher_avatar",
+  "action_id": "lecture_explain",
+  "text": "同学们，我们开始上课。",
+  "voice_id": 0,
+  "prompts": "请自然清晰地朗读。",
+  "mode": "instruct2",
+  "tts_server_url": "http://127.0.0.1:8036",
+  "lip_backend": "wav2lip256",
+  "enhance_mode": "realesr-animevideov3",
+  "max_frames": 150,
+  "fps": 30
+}
+```
+
+字段：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `avatar_id` | 当前 session 的 avatar | 动作素材所属 avatar。 |
+| `action_id` | `auto` | 说话动作素材 ID；`auto` 会从素材库里挑一个。 |
+| `text` | 空 | 要朗读的文本；如果传 `audio_path`，可以不传文本。 |
+| `audio_path` | 空 | 已有 wav 音频路径，传入后不会再调用 TTS。 |
+| `tts_server_url` | `http://127.0.0.1:8036` | 测试 TTS 服务地址。 |
+| `lip_backend` | `wav2lip256` | 可选 `wav2lip256`、`onnx_base`。 |
+| `enhance_mode` | `none` | 可选 `none`、`realesr-animevideov3`、`realesrgan-x4plus-anime`、`clear_reality_x4`。 |
+| `max_frames` | `0` | 最多生成多少帧；`0` 表示按音频长度生成。 |
+| `fps` | `30` | 输出帧率。 |
+| `batch_size` | `LIVETALKING_BATCH_SIZE` 或 `1` | 256 Wav2Lip 离线生成的 batch。 |
+
+当前组合限制：
+
+| `lip_backend` | 可用增强 |
+| --- | --- |
+| `wav2lip256` | `none`、`realesr-animevideov3`、`realesrgan-x4plus-anime` |
+| `onnx_base` | `none`、`clear_reality_x4` |
+
+`realesr-animevideov3` 和 `realesrgan-x4plus-anime` 会使用动作素材里的 `coords.pkl`，只增强动态下半脸 ROI，然后贴回原帧。这样比整帧增强快很多，但仍然不是实时方案。`clear_reality_x4` 是 ONNX 实验仓库自带的帧增强开关，和 RealESRGAN ncnn-vulkan 不是同一个执行方式。
+
+返回：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "task_id": "render-task-id",
+    "task": {
+      "status": "queued",
+      "step": "queued",
+      "message": "任务已创建，等待开始"
+    }
+  }
+}
+```
+
+查询任务：
+
+```http
+GET /render/tasks/{task_id}
+```
+
+成功后的 `result` 示例：
+
+```json
+{
+  "task_id": "render-task-id",
+  "avatar_id": "teacher_avatar",
+  "action_id": "lecture_explain",
+  "output": "tmp/render_outputs/render-task-id/render.mp4",
+  "output_url": "/render/output/render-task-id",
+  "lip_backend": "wav2lip256",
+  "enhance_mode": "realesr-animevideov3",
+  "elapsed_seconds": 42.1
+}
+```
+
+预览生成视频：
+
+```http
+GET /render/output/{task_id}
+```
+
+该接口只会返回 `/render/video-task` 生成并记录在任务结果里的文件，不接受任意本地路径。
+
+实时增强实验配置：
+
+```http
+GET /render/realtime
+POST /render/realtime
+Content-Type: application/json
+```
+
+```json
+{
+  "enabled": false,
+  "lip_backend": "wav2lip256",
+  "enhance_mode": "none"
+}
+```
+
+这个配置用于保留以后接实时增强的入口。当前即使保存为 `enabled=true`，也不会默认把 RealESRGAN 接入 `/alpha/speak` 的实时帧处理，因为在普通消费级显卡上会明显卡顿。
+
+相关环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `RENDER_OUTPUT_DIR` | 生成视频输出目录，默认 `tmp/render_outputs`。 |
+| `REALESRGAN_PATH` | `realesrgan-ncnn-vulkan` 可执行文件路径；如果已加入 PATH，可以不填。 |
+| `WAV2LIP_ONNX_HQ_ROOT` | ONNX Wav2Lip 实验仓库目录，选择 `onnx_base` 时需要。 |
+| `WAV2LIP_ONNX_PYTHON` | ONNX Wav2Lip 使用的 Python；不填时会先找 ONNX 实验目录上级的 `.venv`。 |
+| `RENDER_TTS_TIMEOUT` | 生成音频请求超时时间，默认 120 秒。 |
 
 ## 8. WebRTC 输出
 

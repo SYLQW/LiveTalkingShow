@@ -5,6 +5,8 @@ import {
   Cable,
   ChevronLeft,
   ChevronRight,
+  Eye,
+  EyeOff,
   ImageUp,
   Maximize2,
   Minimize2,
@@ -89,6 +91,16 @@ const PAD_LABELS = {
   right: '右'
 };
 const PAD_KEYS = ['top', 'bottom', 'left', 'right'];
+const RENDER_LIP_BACKENDS = [
+  { value: 'wav2lip256', label: '256 Wav2Lip 主线' },
+  { value: 'onnx_base', label: 'ONNX base 实验' }
+];
+const RENDER_ENHANCE_MODES = [
+  { value: 'none', label: '不增强' },
+  { value: 'realesr-animevideov3', label: 'realesr-animevideov3 局部增强' },
+  { value: 'realesrgan-x4plus-anime', label: 'realesrgan-x4plus-anime 局部增强' },
+  { value: 'clear_reality_x4', label: 'clear_reality_x4.onnx（ONNX）' }
+];
 
 function waitMs(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -107,6 +119,11 @@ function padsFromArray(values) {
     left: Number(source[2]) || 0,
     right: Number(source[3]) || 0
   };
+}
+
+function formatPads(value) {
+  const pads = value || {};
+  return `上 ${Number(pads.top) || 0}，下 ${Number(pads.bottom) || 0}，左 ${Number(pads.left) || 0}，右 ${Number(pads.right) || 0}`;
 }
 
 function parseFrame(packet) {
@@ -345,7 +362,14 @@ function App() {
   const [motionPlan, setMotionPlan] = useState([]);
   const [motionPlanProvider, setMotionPlanProvider] = useState('');
   const [motionPlanRunning, setMotionPlanRunning] = useState(false);
+  const [renderLipBackend, setRenderLipBackend] = useState('wav2lip256');
+  const [renderEnhanceMode, setRenderEnhanceMode] = useState('none');
+  const [renderMaxFrames, setRenderMaxFrames] = useState(150);
+  const [renderUnlimitedFrames, setRenderUnlimitedFrames] = useState(false);
+  const [renderRealtimeEnhance, setRenderRealtimeEnhance] = useState(false);
+  const [renderTask, setRenderTask] = useState(null);
   const [classroomMode, setClassroomMode] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
   const [slideItems, setSlideItems] = useState([]);
   const [slideIndex, setSlideIndex] = useState(0);
   const [avatarPosition, setAvatarPosition] = useState(22);
@@ -377,6 +401,14 @@ function App() {
   const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
   const audioStatsRef = useRef({ chunks: 0, bytes: 0, lastUpdateAt: 0 });
   const currentSlide = slideItems[slideIndex] || null;
+  const renderEnhanceOptions = useMemo(() => (
+    RENDER_ENHANCE_MODES.filter((item) => {
+      if (renderLipBackend === 'onnx_base') {
+        return item.value === 'none' || item.value === 'clear_reality_x4';
+      }
+      return item.value !== 'clear_reality_x4';
+    })
+  ), [renderLipBackend]);
 
   const addLog = useCallback((message, data) => {
     const time = new Date().toLocaleTimeString();
@@ -570,7 +602,6 @@ function App() {
     });
     packedRendererRef.current = renderer;
     renderer.draw(video, width, height, packedWidth);
-    window.requestAnimationFrame(updateCanvasBox);
 
     const stats = frameStatsRef.current;
     const now = performance.now();
@@ -601,7 +632,7 @@ function App() {
         videoReadyState: video.readyState
       });
     }
-  }, [addLog, updateCanvasBox]);
+  }, [addLog]);
 
   const schedulePackedRenderFrame = useCallback(() => {
     const video = packedVideoRef.current;
@@ -658,6 +689,14 @@ function App() {
   }, [addLog, schedulePackedRenderFrame, stopPackedRenderLoop]);
 
   const connectPackedWebRTC = useCallback(async () => {
+    const currentPeer = rtcPeerRef.current;
+    if (
+      currentPeer &&
+      ['new', 'connecting', 'connected'].includes(currentPeer.connectionState)
+    ) {
+      addLog('packed WebRTC 已在连接中，不重复创建', { state: currentPeer.connectionState });
+      return;
+    }
     stopPackedWebRTC(false);
     const connectToken = packedConnectTokenRef.current + 1;
     packedConnectTokenRef.current = connectToken;
@@ -758,6 +797,7 @@ function App() {
       sessionid: answer.sessionid,
       tracks: answer.tracks
     });
+    return peer;
   }, [
     addLog,
     applyPackedAudioPlayback,
@@ -772,6 +812,7 @@ function App() {
   const connectVideo = useCallback(() => {
     if (alphaOutput === 'webrtc-packed') {
       connectPackedWebRTC().catch((error) => {
+        stopPackedWebRTC(false);
         setVideoState('error');
         addLog('packed WebRTC 连接失败', { error: String(error) });
       });
@@ -1274,6 +1315,109 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    if (renderLipBackend === 'wav2lip256' && renderEnhanceMode === 'clear_reality_x4') {
+      setRenderEnhanceMode('none');
+    }
+    if (
+      renderLipBackend === 'onnx_base' &&
+      ['realesr-animevideov3', 'realesrgan-x4plus-anime'].includes(renderEnhanceMode)
+    ) {
+      setRenderEnhanceMode('none');
+    }
+  }, [renderEnhanceMode, renderLipBackend]);
+
+  const generateRenderVideo = useCallback(async () => {
+    setStatus('生成视频中');
+    setRenderTask(null);
+    try {
+      const activeSessionId = await ensureAlphaSession();
+      const resp = await fetch(`${normalized.live}/render/video-task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid: activeSessionId,
+          avatar_id: DEFAULTS.avatarId || undefined,
+          action_id: selectedMotion || 'auto',
+          text,
+          voice_id: voiceId,
+          prompts,
+          mode,
+          tts_server_url: normalized.tts,
+          lip_backend: renderLipBackend,
+          enhance_mode: renderEnhanceMode,
+          max_frames: renderUnlimitedFrames ? 0 : renderMaxFrames,
+          fps: 30,
+          batch_size: 1
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'render task failed');
+      const taskId = payload.data.task_id;
+      setRenderTask(payload.data.task || { task_id: taskId, status: 'queued' });
+      addLog('视频生成任务已提交', {
+        task_id: taskId,
+        lip_backend: renderLipBackend,
+        enhance_mode: renderEnhanceMode
+      });
+
+      for (let index = 0; index < 720; index += 1) {
+        await waitMs(1200);
+        const statusResp = await fetch(`${normalized.live}/render/tasks/${taskId}`);
+        const statusPayload = await statusResp.json();
+        if (!statusResp.ok || statusPayload.code !== 0) throw new Error(statusPayload.msg || 'render status failed');
+        const task = statusPayload.data;
+        setRenderTask(task);
+        if (task.status === 'succeeded') {
+          setStatus('视频已生成');
+          addLog('视频已生成', task.result || {});
+          return;
+        }
+        if (task.status === 'failed') {
+          throw new Error(task.error || task.message || '视频生成失败');
+        }
+      }
+      throw new Error('视频生成仍在运行，请稍后刷新任务状态');
+    } catch (error) {
+      setStatus('视频生成失败');
+      addLog('视频生成失败', { error: String(error) });
+    }
+  }, [
+    addLog,
+    ensureAlphaSession,
+    mode,
+    normalized.live,
+    normalized.tts,
+    prompts,
+    renderEnhanceMode,
+    renderLipBackend,
+    renderMaxFrames,
+    renderUnlimitedFrames,
+    selectedMotion,
+    text,
+    voiceId
+  ]);
+
+  const saveRealtimeRenderConfig = useCallback(async (enabled = renderRealtimeEnhance) => {
+    try {
+      const resp = await fetch(`${normalized.live}/render/realtime`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled,
+          lip_backend: renderLipBackend,
+          enhance_mode: renderEnhanceMode
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'realtime config failed');
+      setRenderRealtimeEnhance(Boolean(payload.data?.enabled));
+      addLog('实时增强实验配置已保存', payload.data || {});
+    } catch (error) {
+      addLog('实时增强实验配置保存失败', { error: String(error) });
+    }
+  }, [addLog, normalized.live, renderEnhanceMode, renderLipBackend, renderRealtimeEnhance]);
+
   const pushViaTask = async () => {
     setStatus('task');
     try {
@@ -1482,43 +1626,6 @@ function App() {
 
           <div className="tuningPanel">
             <div className="controlHeader">
-              <span><SlidersHorizontal size={16} />贴回区域</span>
-              <button type="button" className="iconButton" onClick={() => setShowOverlay((value) => !value)}>
-                {showOverlay ? <Eye size={15} /> : <EyeOff size={15} />}
-              </button>
-            </div>
-            <div className="padSummary">
-              <span>当前使用：{formatPads(pads)}</span>
-              <span>生成 avatar 时：{formatPads(generationPads)}</span>
-              <strong>贴回差值：{formatPads(pasteDeltaPads)}</strong>
-            </div>
-            <div className="padsGrid">
-              {Object.entries(PAD_LABELS).map(([key, label]) => (
-                <label className="padControl" key={key}>
-                  <span>{label} {pads[key]}</span>
-                  <input
-                    type="range"
-                    min="-300"
-                    max="300"
-                    step="1"
-                    value={pads[key]}
-                    onChange={(event) => setPadValue(key, event.target.value)}
-                  />
-                </label>
-              ))}
-            </div>
-            <div className="controlRow">
-              <button type="button" onClick={() => updatePads({ top: 0, bottom: 0, left: 0, right: 0 })}>
-                <RotateCcw size={15} />重置
-              </button>
-              <button type="button" onClick={() => syncTuning()}>
-                <Cable size={15} />同步
-              </button>
-            </div>
-          </div>
-
-          <div className="tuningPanel">
-            <div className="controlHeader">
               <span><SlidersHorizontal size={16} />说话动作</span>
               <div className="controlActions">
                 <button type="button" onClick={() => refreshMotionClips(sessionId, { reload: true })}>
@@ -1714,6 +1821,90 @@ function App() {
                 </div>
               ))}
             </div>
+          </details>
+
+          <details className="tuningPanel renderPanel collapsePanel">
+            <summary>
+              <span><Video size={16} />生成视频</span>
+              {renderTask?.status && <em>{renderTask.status}</em>}
+            </summary>
+            <div className="grid2">
+              <label>
+                唇形后端
+                <select value={renderLipBackend} onChange={(event) => setRenderLipBackend(event.target.value)}>
+                  {RENDER_LIP_BACKENDS.map((item) => (
+                    <option value={item.value} key={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                画质增强
+                <select value={renderEnhanceMode} onChange={(event) => setRenderEnhanceMode(event.target.value)}>
+                  {renderEnhanceOptions.map((item) => (
+                    <option value={item.value} key={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label>
+              最大生成帧数 {renderUnlimitedFrames ? '无限制' : renderMaxFrames}
+              <input
+                type="range"
+                min="30"
+                max="900"
+                step="30"
+                value={renderMaxFrames}
+                disabled={renderUnlimitedFrames}
+                onChange={(event) => setRenderMaxFrames(Number.parseInt(event.target.value || '0', 10))}
+              />
+            </label>
+            <label className="checkboxLine">
+              <input
+                type="checkbox"
+                checked={renderUnlimitedFrames}
+                onChange={(event) => setRenderUnlimitedFrames(event.target.checked)}
+              />
+              不限制帧数，按音频长度生成
+            </label>
+            <label className="checkboxLine">
+              <input
+                type="checkbox"
+                checked={renderRealtimeEnhance}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setRenderRealtimeEnhance(checked);
+                  saveRealtimeRenderConfig(checked);
+                }}
+              />
+              实时增强实验开关
+            </label>
+            <span className="fieldHint">现在推荐先用“生成视频”看效果。实时增强配置会保存，但默认流程不会把 RealESRGAN 接到实时帧里。</span>
+            <div className="buttons">
+              <button type="button" onClick={generateRenderVideo}>
+                <Video size={16} />生成视频
+              </button>
+              <a className="buttonLink" href="/render-library.html" target="_blank" rel="noreferrer">
+                <Video size={16} />视频库
+              </a>
+              <button type="button" onClick={() => saveRealtimeRenderConfig(renderRealtimeEnhance)}>
+                <SlidersHorizontal size={16} />保存配置
+              </button>
+            </div>
+            {renderTask && (
+              <div className="renderStatus">
+                <strong>{renderTask.message || renderTask.step || renderTask.status}</strong>
+                {renderTask.error && <p>{renderTask.error}</p>}
+                {renderTask.result?.elapsed_seconds && <span>耗时 {renderTask.result.elapsed_seconds}s</span>}
+                {renderTask.result?.output && <code>{renderTask.result.output}</code>}
+                {renderTask.result?.output_url && (
+                  <video
+                    key={renderTask.result.output_url}
+                    controls
+                    src={`${normalized.live}${renderTask.result.output_url}?t=${renderTask.updated_at || Date.now()}`}
+                  />
+                )}
+              </div>
+            )}
           </details>
 
           <div className="buttons">
